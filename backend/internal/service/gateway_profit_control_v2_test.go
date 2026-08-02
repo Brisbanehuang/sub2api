@@ -475,3 +475,44 @@ func (c *sentinelMissGatewayCache) GetSessionAccountID(ctx context.Context, grou
 	}
 	return 0, ErrStickySessionNotFound
 }
+
+// WaitPlan 等待路径回归（本站对齐 Messages/Gemini 语义）：Responses/Chat 的
+// handler 守卫为 ProfitGateActive() || !selection.Acquired——无门的等待成功
+// selection 必须建立粘性（官方原版此路径无绑定点，本站有意补齐）；门下等待
+// 成功不得覆盖既有不同绑定。
+func TestGatewayProfitControlWaitPlanBindingSemantics(t *testing.T) {
+	groupID := int64(4)
+	expensiveID := int64(181)
+	cheapID := int64(182)
+	waitSelection := &AccountSelectionResult{
+		Account:  &Account{ID: cheapID},
+		Acquired: false,
+		WaitPlan: &AccountWaitPlan{AccountID: cheapID},
+	}
+
+	t.Run("ungated wait success binds eagerly", func(t *testing.T) {
+		cache := &sentinelMissGatewayCache{mockGatewayCacheForPlatform: &mockGatewayCacheForPlatform{sessionBindings: map[string]int64{}}}
+		svc := &GatewayService{cache: cache}
+		require.False(t, waitSelection.ProfitGateActive())
+		require.True(t, waitSelection.ProfitGateActive() || !waitSelection.Acquired, "handler 守卫必须放行无门等待路径")
+		admissionCtx := ContextWithSelectionProfitGate(context.Background(), waitSelection)
+		require.NoError(t, svc.BindStickySessionAfterProfitAdmission(admissionCtx, &groupID, "wait-s", cheapID))
+		require.Equal(t, cheapID, cache.sessionBindings["wait-s"], "无门等待成功必须建立粘性绑定")
+	})
+
+	t.Run("gated wait success keeps existing binding", func(t *testing.T) {
+		cache := &sentinelMissGatewayCache{mockGatewayCacheForPlatform: &mockGatewayCacheForPlatform{sessionBindings: map[string]int64{"wait-s": expensiveID}}}
+		svc := &GatewayService{cache: cache}
+		gate := &openAIProfitControlGate{groupID: groupID, platform: PlatformAnthropic, threshold: 0.5}
+		gatedSelection := &AccountSelectionResult{
+			Account:    &Account{ID: cheapID},
+			Acquired:   false,
+			WaitPlan:   &AccountWaitPlan{AccountID: cheapID},
+			profitGate: gate,
+		}
+		require.True(t, gatedSelection.ProfitGateActive())
+		admissionCtx := ContextWithSelectionProfitGate(context.Background(), gatedSelection)
+		require.NoError(t, svc.BindStickySessionAfterProfitAdmission(admissionCtx, &groupID, "wait-s", cheapID))
+		require.Equal(t, expensiveID, cache.sessionBindings["wait-s"], "门下等待成功不得覆盖既有不同绑定")
+	})
+}

@@ -241,7 +241,10 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		}
 		account = latest
 		selection.Account = latest
-		if selection.ProfitGateActive() {
+		// 本站有意补齐官方 Responses/Chat 的 WaitPlan 粘性缺口：快速抢槽已在
+		// 选号阶段完成 eager 绑定，等待成功（Acquired=false）则由此处补绑；
+		// 利润门流量仍只在终检准入后绑定，且不会覆盖既有不同绑定。
+		if selection.ProfitGateActive() || !selection.Acquired {
 			if err := h.gatewayService.BindStickySessionAfterProfitAdmission(admissionCtx, apiKey.GroupID, selectionSessionHash, account.ID); err != nil {
 				reqLog.Warn("gateway.cc.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 			}

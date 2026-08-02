@@ -91,3 +91,72 @@ func TestAPIKeyAuthSnapshotOldVersionEvicted(t *testing.T) {
 	require.False(t, used, "版本不匹配的缓存条目必须淘汰并回源重建")
 	require.Nil(t, materialized)
 }
+
+// 官方 v0.1.170 与本站旧生产都使用 v18，但旧生产快照多出已经停用的
+// profit_exclude_unpriceable 字段。切换时会定向清缓存；本测试再证明残留条目
+// 即使被读到，也会按 JSON 向前兼容语义忽略死字段，并保留现行利润门字段。
+func TestAPIKeyAuthSnapshotAcceptsLegacyV18ExtraProfitField(t *testing.T) {
+	svc := &APIKeyService{}
+	snapshot := svc.snapshotFromAPIKey(context.Background(), profitAuthTestAPIKey())
+	require.NotNil(t, snapshot)
+
+	payload, err := json.Marshal(&APIKeyAuthCacheEntry{Snapshot: snapshot})
+	require.NoError(t, err)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(payload, &raw))
+	rawSnapshot := raw["snapshot"].(map[string]any)
+	rawGroup := rawSnapshot["group"].(map[string]any)
+	rawGroup["profit_exclude_unpriceable"] = true
+	legacyPayload, err := json.Marshal(raw)
+	require.NoError(t, err)
+
+	var restored APIKeyAuthCacheEntry
+	require.NoError(t, json.Unmarshal(legacyPayload, &restored))
+	require.NotNil(t, restored.Snapshot)
+	require.Equal(t, apiKeyAuthSnapshotVersion, restored.Snapshot.Version)
+	require.NotNil(t, restored.Snapshot.Group)
+	require.True(t, restored.Snapshot.Group.ProfitControlEnabled)
+	require.InDelta(t, 0.2, restored.Snapshot.Group.ProfitMinMargin, 1e-12)
+	require.InDelta(t, 0.05, restored.Snapshot.Group.ProfitSafetyBuffer, 1e-12)
+
+	materialized, used, err := svc.applyAuthCacheEntry("sk-legacy-v18", &restored)
+	require.NoError(t, err)
+	require.True(t, used)
+	ctx := context.WithValue(context.Background(), ctxkey.Group, materialized.Group)
+	gate := (&OpenAIGatewayService{}).resolveOpenAIProfitControlGate(ctx, materialized.GroupID)
+	require.NotNil(t, gate, "旧 v18 的额外死字段不得阻止现行利润门安装")
+	require.InDelta(t, 0.06*(1-0.25), gate.threshold, 1e-12)
+}
+
+// 回滚方向同样兼容：旧 v0.1.169 结构读取官方新 v18 JSON 时，缺失的死字段
+// 自然落为 false，三个仍在使用的利润字段保持不变。旧 V2 运行时也已停止读取
+// ProfitExcludeUnpriceable，因此该零值不会改变准入语义。
+func TestAPIKeyAuthSnapshotLegacyReaderAcceptsOfficialV18(t *testing.T) {
+	type legacyProfitGroup struct {
+		ProfitControlEnabled     bool    `json:"profit_control_enabled"`
+		ProfitMinMargin          float64 `json:"profit_min_margin"`
+		ProfitSafetyBuffer       float64 `json:"profit_safety_buffer"`
+		ProfitExcludeUnpriceable bool    `json:"profit_exclude_unpriceable"`
+	}
+	type legacySnapshot struct {
+		Version int                `json:"version"`
+		Group   *legacyProfitGroup `json:"group,omitempty"`
+	}
+	type legacyEntry struct {
+		Snapshot *legacySnapshot `json:"snapshot,omitempty"`
+	}
+
+	snapshot := (&APIKeyService{}).snapshotFromAPIKey(context.Background(), profitAuthTestAPIKey())
+	payload, err := json.Marshal(&APIKeyAuthCacheEntry{Snapshot: snapshot})
+	require.NoError(t, err)
+
+	var restored legacyEntry
+	require.NoError(t, json.Unmarshal(payload, &restored))
+	require.NotNil(t, restored.Snapshot)
+	require.Equal(t, 18, restored.Snapshot.Version)
+	require.NotNil(t, restored.Snapshot.Group)
+	require.True(t, restored.Snapshot.Group.ProfitControlEnabled)
+	require.InDelta(t, 0.2, restored.Snapshot.Group.ProfitMinMargin, 1e-12)
+	require.InDelta(t, 0.05, restored.Snapshot.Group.ProfitSafetyBuffer, 1e-12)
+	require.False(t, restored.Snapshot.Group.ProfitExcludeUnpriceable, "官方新 v18 缺少的旧死字段应安全落为 false")
+}
