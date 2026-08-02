@@ -18,7 +18,9 @@ ARG GOSUMDB=sum.golang.google.cn
 FROM ${NODE_IMAGE} AS frontend-builder
 
 WORKDIR /app/frontend
-ENV NODE_OPTIONS=--max-old-space-size=1536
+# v0.1.170 前端在 1536 MiB 下会于 vue-tsc 阶段稳定 OOM；2048 MiB 已在
+# 本机 production build 实测通过。仅调整构建容器上限，不影响运行时内存。
+ENV NODE_OPTIONS=--max-old-space-size=2048
 
 # Install pnpm. Keep this pinned to the lockfile-compatible major version so
 # Docker builds remain reproducible when pnpm changes config validation rules.
