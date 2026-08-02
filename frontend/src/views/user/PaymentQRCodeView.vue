@@ -44,6 +44,7 @@ import { useAppStore } from '@/stores'
 import { isBuiltInAlipayMethod, isBuiltInWxpayMethod } from '@/components/payment/providerConfig'
 import QRCode from 'qrcode'
 import alipayIcon from '@/assets/icons/alipay.svg'
+import usdtIcon from '@/assets/icons/usdt.svg'
 import wxpayIcon from '@/assets/icons/wxpay.svg'
 
 const { t } = useI18n()
@@ -70,22 +71,26 @@ const countdownDisplay = computed(() => {
   return m.toString().padStart(2, '0') + ':' + s.toString().padStart(2, '0')
 })
 
+const isUSDT = computed(() => paymentType.value === 'usdt')
 const isAlipay = computed(() => isBuiltInAlipayMethod(paymentType.value))
 const isWxpay = computed(() => isBuiltInWxpayMethod(paymentType.value))
 
 const scanTitle = computed(() => {
+  if (isUSDT.value) return t('payment.qr.scanUSDT')
   if (isAlipay.value) return t('payment.qr.scanAlipay')
   if (isWxpay.value) return t('payment.qr.scanWxpay')
   return t('payment.qr.scanToPay')
 })
 
 const scanHint = computed(() => {
+  if (isUSDT.value) return t('payment.qr.scanUSDTHint')
   if (isAlipay.value) return t('payment.qr.scanAlipayHint')
   if (isWxpay.value) return t('payment.qr.scanWxpayHint')
   return ''
 })
 
 function getLogoForType(): string | null {
+  if (isUSDT.value) return usdtIcon
   if (isAlipay.value) return alipayIcon
   if (isWxpay.value) return wxpayIcon
   return null

@@ -2,11 +2,15 @@ import { describe, expect, it } from 'vitest'
 import {
   PAYMENT_CURRENCY_OPTIONS,
   PROVIDER_CONFIG_FIELDS,
+  PROVIDER_SUPPORTED_TYPES,
   isBuiltInAlipayMethod,
   isBuiltInWxpayMethod,
   parseEasyPayCustomMethods,
+  providerMatchesEnabledPaymentTypes,
   serializeEasyPayCustomMethods,
 } from '@/components/payment/providerConfig'
+import zh from '@/i18n/locales/zh'
+import en from '@/i18n/locales/en'
 
 function findField(providerKey: string, key: string) {
   const fields = PROVIDER_CONFIG_FIELDS[providerKey] || []
@@ -23,6 +27,40 @@ describe('PROVIDER_CONFIG_FIELDS.wxpay', () => {
     expect(findField('wxpay', 'mpAppId')).toBeUndefined()
     expect(findField('wxpay', 'h5AppName')).toBeUndefined()
     expect(findField('wxpay', 'h5AppUrl')).toBeUndefined()
+  })
+})
+
+describe('PROVIDER_CONFIG_FIELDS.easypay', () => {
+  it('supports USDT as a first-class EasyPay method', () => {
+    expect(PROVIDER_SUPPORTED_TYPES.easypay).toContain('usdt')
+  })
+
+  it('allows an optional USDT-specific channel id', () => {
+    const cidUsdt = findField('easypay', 'cidUsdt')
+
+    expect(cidUsdt?.optional).toBe(true)
+    expect(cidUsdt?.sensitive).toBe(false)
+  })
+
+  it('does not treat a user-facing USDT method as global EasyPay provider enablement', () => {
+    expect(providerMatchesEnabledPaymentTypes('easypay', ['usdt'], ['usdt', 'stripe'])).toBe(false)
+  })
+
+  it('keeps legacy EasyPay provider-key enablement compatible', () => {
+    expect(providerMatchesEnabledPaymentTypes('easypay', ['usdt'], ['easypay', 'stripe'])).toBe(true)
+  })
+
+  it('does not enable EasyPay when none of its methods are globally enabled', () => {
+    expect(providerMatchesEnabledPaymentTypes('easypay', ['usdt'], ['stripe'])).toBe(false)
+  })
+})
+
+describe('payment method labels', () => {
+  it('keeps USDT and Alipay as separate user-facing methods', () => {
+    expect(zh.payment.methods.usdt).toBe('USDT')
+    expect(zh.payment.methods.alipay).toBe('支付宝')
+    expect(en.payment.methods.usdt).toBe('USDT')
+    expect(en.payment.methods.alipay).toBe('Alipay')
   })
 })
 

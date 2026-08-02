@@ -693,6 +693,7 @@ export default {
         field_paymentCurrencyHint: 'Default is CNY. Stripe and Airwallex can choose HKD, USD, or another listed currency supported by the account; WeChat Pay, Alipay, and EasyPay remain CNY.',
         field_accountIdHint: 'Leave this empty unless you use multiple accounts, an organization-level key, or connected-account payments. A single-account scoped API key uses the selected account by default.',
         field_cid: 'Channel ID',
+        field_cidUsdt: 'USDT Channel ID',
         field_cidAlipay: 'Alipay Channel ID',
         field_cidWxpay: 'WeChat Channel ID',
         easypayCustomMethods: 'Custom EasyPay methods',

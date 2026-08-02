@@ -2,6 +2,8 @@ package provider
 
 import (
 	"testing"
+
+	"github.com/Wei-Shaw/sub2api/internal/payment"
 )
 
 func TestEasyPaySignConsistentOutput(t *testing.T) {
@@ -24,6 +26,52 @@ func TestEasyPaySignConsistentOutput(t *testing.T) {
 	if len(sign1) != 32 {
 		t.Fatalf("MD5 hex should be 32 chars, got %d", len(sign1))
 	}
+}
+
+func TestEasyPaySupportsUSDT(t *testing.T) {
+	t.Parallel()
+
+	provider := &EasyPay{}
+
+	if !containsPaymentType(provider.SupportedTypes(), payment.TypeUSDT) {
+		t.Fatalf("EasyPay.SupportedTypes() should include %q, got %v", payment.TypeUSDT, provider.SupportedTypes())
+	}
+}
+
+func TestEasyPayResolveCIDUsesUSDTSpecificCID(t *testing.T) {
+	t.Parallel()
+
+	provider := &EasyPay{config: map[string]string{
+		"cid":      "generic",
+		"cidWxpay": "wx-channel",
+		"cidUsdt":  "usdt-channel",
+	}}
+
+	if got := provider.resolveCID(payment.TypeUSDT); got != "usdt-channel" {
+		t.Fatalf("resolveCID(usdt) = %q, want usdt-channel", got)
+	}
+}
+
+func TestEasyPayResolveCIDForUSDTFallsBackToGenericCIDOnly(t *testing.T) {
+	t.Parallel()
+
+	provider := &EasyPay{config: map[string]string{
+		"cid":      "generic",
+		"cidWxpay": "wx-channel",
+	}}
+
+	if got := provider.resolveCID(payment.TypeUSDT); got != "generic" {
+		t.Fatalf("resolveCID(usdt) = %q, want generic cid and not cidWxpay", got)
+	}
+}
+
+func containsPaymentType(types []payment.PaymentType, want payment.PaymentType) bool {
+	for _, got := range types {
+		if got == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestEasyPaySignExcludesSignAndSignType(t *testing.T) {

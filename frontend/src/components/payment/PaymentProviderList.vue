@@ -60,7 +60,7 @@
           <div class="min-w-0 flex-1">
             <ProviderCard
               :provider="p"
-              :enabled="isEnabled(p.provider_key)"
+              :enabled="isEnabled(p)"
               :available-types="getTypes(p.provider_key)"
               @toggle-field="(field) => emit('toggleField', p, field)"
               @toggle-type="(type) => emit('toggleType', p, type)"
@@ -99,7 +99,7 @@ import Icon from '@/components/icons/Icon.vue'
 import ProviderCard from './ProviderCard.vue'
 import type { ProviderInstance } from '@/types/payment'
 import type { TypeOption } from './providerConfig'
-import { getAvailableTypes } from './providerConfig'
+import { getAvailableTypes, providerMatchesEnabledPaymentTypes } from './providerConfig'
 
 const props = defineProps<{
   providers: ProviderInstance[]
@@ -136,8 +136,12 @@ function onDragEnd() {
   emit('reorder', updates)
 }
 
-function isEnabled(providerKey: string): boolean {
-  return props.enabledPaymentTypes.includes(providerKey)
+function isEnabled(provider: ProviderInstance): boolean {
+  return providerMatchesEnabledPaymentTypes(
+    provider.provider_key,
+    provider.supported_types,
+    props.enabledPaymentTypes,
+  )
 }
 
 function getTypes(providerKey: string): TypeOption[] {

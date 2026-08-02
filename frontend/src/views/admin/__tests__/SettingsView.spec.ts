@@ -192,6 +192,16 @@ vi.mock("vue-i18n", async () => {
     "admin.settings.paymentVisibleMethods.sourceRequiredError": "{title} 已启用，请先选择支付来源。",
     "admin.settings.payment.configGuide": "查看支付配置说明",
     "admin.settings.payment.findProvider": "查看支持的支付方式",
+    "admin.settings.payment.enabledPaymentTypes": "启用的服务商",
+    "admin.settings.payment.providerEasypay": "易支付",
+    "admin.settings.payment.providerAlipay": "支付宝官方",
+    "admin.settings.payment.providerStripe": "Stripe",
+    "payment.methods.easypay": "易支付",
+    "payment.methods.alipay": "支付宝",
+    "payment.methods.wxpay": "微信支付",
+    "payment.methods.stripe": "Stripe",
+    "payment.methods.airwallex": "Airwallex",
+    "payment.methods.usdt": "USDT",
     "admin.settings.openaiExperimentalScheduler.title": "OpenAI 实验调度策略",
     "admin.settings.openaiExperimentalScheduler.description": "默认关闭。开启后仅影响本网关在 OpenAI 账号间的实验性调度选择逻辑，不代表上游 OpenAI 官方能力。",
     "admin.settings.openaiExperimentalScheduler.lowRatePriorityTitle": "低倍率优先",
@@ -848,6 +858,78 @@ describe("admin SettingsView payment visible method controls", () => {
         forwarded_client_ip_headers: ["Cf-Connecting-Ip", "X-Client-Ip"],
       }),
     );
+  });
+
+  it("renders enabled payment toggles as provider keys instead of user-facing USDT", async () => {
+    const wrapper = mountView();
+
+    await flushPromises();
+    await openPaymentTab(wrapper);
+
+    const text = wrapper.text();
+    expect(text).toContain("启用的服务商");
+    expect(text).toContain("易支付");
+    expect(text).toContain("支付宝");
+    expect(text).toContain("微信支付");
+    expect(text).toContain("Stripe");
+    expect(text).toContain("Airwallex");
+    expect(text).not.toContain("USDT");
+    expect(text).not.toContain("支付宝官方");
+  });
+
+  it("passes enabled EasyPay provider key to the create-provider dialog", async () => {
+    getSettings.mockResolvedValueOnce({
+      ...baseSettingsResponse,
+      payment_enabled_types: ["easypay", "stripe"],
+    });
+
+    const PaymentProviderDialogStub = defineComponent({
+      props: {
+        enabledKeyOptions: {
+          type: Array,
+          default: () => [],
+        },
+      },
+      setup(props, { expose }) {
+        expose({
+          reset: vi.fn(),
+        });
+        return () =>
+          h(
+            "div",
+            { class: "provider-dialog-stub" },
+            JSON.stringify(props.enabledKeyOptions),
+          );
+      },
+    });
+
+    const wrapper = mount(SettingsView, {
+      global: {
+        stubs: {
+          AppLayout: AppLayoutStub,
+          Select: SelectStub,
+          Toggle: ToggleStub,
+          Icon: true,
+          ConfirmDialog: true,
+          PaymentProviderList: true,
+          PaymentProviderDialog: PaymentProviderDialogStub,
+          GroupBadge: true,
+          GroupOptionItem: true,
+          ProxySelector: true,
+          ImageUpload: ImageUploadStub,
+          BackupSettings: true,
+        },
+      },
+    });
+
+    await flushPromises();
+    await openPaymentTab(wrapper);
+
+    const dialogText = wrapper.get(".provider-dialog-stub").text();
+    expect(dialogText).toContain('"value":"easypay"');
+    expect(dialogText).toContain('"label":"易支付"');
+    expect(dialogText).toContain('"value":"stripe"');
+    expect(dialogText).not.toContain('"value":"usdt"');
   });
 
   it("links payment guidance to README sections instead of removed payment docs", async () => {

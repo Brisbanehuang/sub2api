@@ -61,7 +61,7 @@ func (s *PaymentService) CreateOrder(ctx context.Context, req CreateOrderRequest
 	} else if req.OrderType == payment.OrderTypeBalance {
 		orderAmount = calculateCreditedBalance(req.Amount, cfg.BalanceRechargeMultiplier)
 	}
-	feeRate := cfg.RechargeFeeRate
+	feeRate := createOrderFeeRate(req.PaymentType, cfg)
 	methodCurrency := payment.DefaultPaymentCurrency
 	if s.configService != nil {
 		methodCurrency, err = s.configService.ValidateMethodCurrencyConsistency(ctx, req.PaymentType)
@@ -663,6 +663,23 @@ func calculateSubscriptionGatewayBaseAmount(amount, usdToCnyRate float64, curren
 		Mul(decimal.NewFromFloat(rate)).
 		Round(int32(payment.CurrencyMaxFractionDigits(currency))).
 		InexactFloat64()
+}
+
+func createOrderFeeRate(paymentType string, cfg *PaymentConfig) float64 {
+	if defaultRate := defaultFeeRateForPaymentType(paymentType); defaultRate > 0 {
+		return defaultRate
+	}
+	if cfg == nil {
+		return 0
+	}
+	return cfg.RechargeFeeRate
+}
+
+func defaultFeeRateForPaymentType(paymentType string) float64 {
+	if NormalizeVisibleMethod(paymentType) == payment.TypeStripe {
+		return 3
+	}
+	return 0
 }
 
 func validateCreateOrderAmountCurrency(amount float64, currency string) error {

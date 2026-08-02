@@ -117,6 +117,15 @@ func TestPcAggregateMethodLimits(t *testing.T) {
 		}
 	})
 
+	t.Run("stripe defaults to 3 percent fee even when unlimited", func(t *testing.T) {
+		t.Parallel()
+		stripe := makeInstance(1, payment.TypeStripe, "card,link,wxpay", "")
+		ml := pcAggregateMethodLimits(payment.TypeStripe, []*dbent.PaymentProviderInstance{stripe})
+		if ml.FeeRate != 3 {
+			t.Fatalf("stripe fee rate = %v, want 3", ml.FeeRate)
+		}
+	})
+
 	t.Run("invalid JSON treated as unlimited", func(t *testing.T) {
 		t.Parallel()
 		inst := makeInstance(1, "easypay", "alipay", `{invalid json}`)

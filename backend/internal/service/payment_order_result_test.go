@@ -331,6 +331,21 @@ func TestComputeValidityDaysSupportsSingularAndPluralUnits(t *testing.T) {
 	}
 }
 
+func TestCreateOrderFeeRateAppliesStripeDefaultOnly(t *testing.T) {
+	t.Parallel()
+
+	cfg := &PaymentConfig{RechargeFeeRate: 0}
+	if got := createOrderFeeRate(payment.TypeStripe, cfg); got != 3 {
+		t.Fatalf("stripe fee rate = %v, want 3", got)
+	}
+	if got := createOrderFeeRate(payment.TypeUSDT, cfg); got != 0 {
+		t.Fatalf("usdt fee rate = %v, want 0", got)
+	}
+	if got := createOrderFeeRate(payment.TypeWxpay, &PaymentConfig{RechargeFeeRate: 1.5}); got != 1.5 {
+		t.Fatalf("non-stripe fallback fee rate = %v, want 1.5", got)
+	}
+}
+
 func TestBuildPaymentSubjectAppliesAffixToSubscriptionPlanProductName(t *testing.T) {
 	t.Parallel()
 

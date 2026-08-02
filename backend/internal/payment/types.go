@@ -2,7 +2,10 @@
 // registry, load balancing, and shared utilities for the payment subsystem.
 package payment
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 // PaymentType represents a supported payment method.
 type PaymentType = string
@@ -16,6 +19,7 @@ const (
 	TypeStripe       PaymentType = "stripe"
 	TypeCard         PaymentType = "card"
 	TypeLink         PaymentType = "link"
+	TypeUSDT         PaymentType = "usdt"
 	TypeEasyPay      PaymentType = "easypay"
 	TypeAirwallex    PaymentType = "airwallex"
 )
@@ -88,6 +92,8 @@ func GetBasePaymentType(t string) string {
 		return TypeAirwallex
 	case t == TypeStripe || t == TypeCard || t == TypeLink:
 		return TypeStripe
+	case t == TypeUSDT || strings.HasPrefix(t, TypeUSDT+"."):
+		return TypeUSDT
 	case len(t) >= len(TypeAlipay) && t[:len(TypeAlipay)] == TypeAlipay:
 		return TypeAlipay
 	case len(t) >= len(TypeWxpay) && t[:len(TypeWxpay)] == TypeWxpay:

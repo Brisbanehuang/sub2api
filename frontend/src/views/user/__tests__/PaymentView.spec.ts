@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, shallowMount } from '@vue/test-utils'
+import { flushPromises, mount, shallowMount } from '@vue/test-utils'
 import PaymentView from '../PaymentView.vue'
 import { PAYMENT_RECOVERY_STORAGE_KEY } from '@/components/payment/paymentFlow'
 import { formatPaymentAmount } from '@/components/payment/currency'
@@ -121,6 +121,7 @@ function checkoutInfoFixture(overrides: Partial<CheckoutInfoResponse> = {}) {
 function checkoutInfoWithPlansFixture(options: {
   checkout?: Partial<CheckoutInfoResponse>
   method?: Partial<MethodLimit>
+  methods?: CheckoutInfoResponse['methods']
   plan?: Partial<SubscriptionPlan>
 } = {}) {
   const base = checkoutInfoFixture(options.checkout).data
@@ -148,7 +149,7 @@ function checkoutInfoWithPlansFixture(options: {
   return {
     data: {
       ...base,
-      methods: {
+      methods: options.methods ?? {
         ...base.methods,
         wxpay: {
           ...base.methods.wxpay,
@@ -156,6 +157,34 @@ function checkoutInfoWithPlansFixture(options: {
         },
       },
       plans: [plan],
+    },
+  }
+}
+
+function checkoutInfoWithStripeFeeFixture() {
+  return {
+    data: {
+      ...checkoutInfoFixture().data,
+      methods: {
+        usdt: {
+          daily_limit: 0,
+          daily_used: 0,
+          daily_remaining: 0,
+          single_min: 0,
+          single_max: 0,
+          fee_rate: 0,
+          available: true,
+        },
+        stripe: {
+          daily_limit: 0,
+          daily_used: 0,
+          daily_remaining: 0,
+          single_min: 0,
+          single_max: 0,
+          fee_rate: 3,
+          available: true,
+        },
+      },
     },
   }
 }
@@ -379,6 +408,42 @@ describe('PaymentView subscription confirmation amounts', () => {
     expect(text).toContain(fee)
     expect(text).toContain(total)
     expect(wrapper.findAll('button').some(button => button.text().includes(total))).toBe(true)
+  })
+
+  it('uses each subscription method fee when checking limits and blocks an over-limit submit', async () => {
+    const baseMethod = checkoutInfoFixture().data.methods.wxpay
+    const wrapper = await mountSubscriptionConfirm({
+      methods: {
+        usdt: {
+          ...baseMethod,
+          single_max: 100,
+        },
+        stripe: {
+          ...baseMethod,
+          single_max: 100,
+          fee_rate: 3,
+        },
+      },
+      plan: {
+        price: 100,
+      },
+    })
+    const view = wrapper.vm as unknown as {
+      subMethodOptions: Array<{ type: string; available: boolean }>
+      selectedMethod: string
+      confirmSubscribe: () => Promise<void>
+    }
+
+    expect(view.subMethodOptions.find(method => method.type === 'usdt')?.available).toBe(true)
+    expect(view.subMethodOptions.find(method => method.type === 'stripe')?.available).toBe(false)
+
+    view.selectedMethod = 'stripe'
+    await wrapper.vm.$nextTick()
+    const submitButton = wrapper.findAll('button').find(button => button.text().includes('payment.createOrder'))
+    expect(submitButton?.attributes('disabled')).toBeDefined()
+    await submitButton!.trigger('click')
+    await view.confirmSubscribe()
+    expect(createOrder).not.toHaveBeenCalled()
   })
 })
 
@@ -698,5 +763,153 @@ describe('PaymentView WeChat JSAPI flow', () => {
     expect(showWarning).toHaveBeenCalledWith('payment.errors.mobilePaymentFallbackToQr')
     expect(showError).not.toHaveBeenCalled()
     expect(window.localStorage.getItem(PAYMENT_RECOVERY_STORAGE_KEY)).toContain('weixin://wxpay/bizpayurl?pr=fallback-native')
+  })
+})
+
+describe('PaymentView Stripe fee preview', () => {
+  beforeEach(() => {
+    routeState.path = '/purchase'
+    routeState.query = {}
+    routerReplace.mockReset().mockResolvedValue(undefined)
+    routerPush.mockReset().mockResolvedValue(undefined)
+    routerResolve.mockClear()
+    createOrder.mockReset()
+    refreshUser.mockReset()
+    fetchActiveSubscriptions.mockReset().mockResolvedValue(undefined)
+    showError.mockReset()
+    showInfo.mockReset()
+    showWarning.mockReset()
+    getCheckoutInfo.mockReset().mockResolvedValue(checkoutInfoWithStripeFeeFixture())
+    bridgeInvoke.mockReset()
+    window.localStorage.clear()
+  })
+
+  it('shows 3 percent Stripe fee and 51.50 total for a 50 recharge', async () => {
+    const wrapper = mount(PaymentView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          Teleport: true,
+          Transition: false,
+        },
+      },
+    })
+    await flushPromises()
+    await flushPromises()
+
+    ;(wrapper.vm as unknown as { amount: number | null; selectedMethod: string }).amount = 50
+    ;(wrapper.vm as unknown as { amount: number | null; selectedMethod: string }).selectedMethod = 'stripe'
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.text()).toContain('payment.fee (3%)')
+    expect(wrapper.text()).toContain('¥1.50')
+    expect(wrapper.text()).toContain('¥51.50')
+    expect(wrapper.text()).toContain('payment.createOrder ¥51.50')
+  })
+
+  it('rounds a 3 percent fee for 37 to 1.11 like the backend decimal calculation', async () => {
+    const wrapper = mount(PaymentView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          Teleport: true,
+          Transition: false,
+        },
+      },
+    })
+    await flushPromises()
+    await flushPromises()
+
+    ;(wrapper.vm as unknown as { amount: number | null; selectedMethod: string }).amount = 37
+    ;(wrapper.vm as unknown as { amount: number | null; selectedMethod: string }).selectedMethod = 'stripe'
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.text()).toContain('payment.fee (3%)')
+    expect(wrapper.text()).toContain('¥1.11')
+    expect(wrapper.text()).toContain('¥38.11')
+    expect(wrapper.text()).toContain('payment.createOrder ¥38.11')
+    expect(wrapper.text()).not.toContain('¥1.12')
+    expect(wrapper.text()).not.toContain('¥38.12')
+  })
+
+  it('uses the backend three-decimal currency precision for IQD fees', async () => {
+    const checkout = checkoutInfoWithStripeFeeFixture()
+    checkout.data.methods.stripe.currency = 'IQD'
+    getCheckoutInfo.mockResolvedValue(checkout)
+    const wrapper = mount(PaymentView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          Teleport: true,
+          Transition: false,
+        },
+      },
+    })
+    await flushPromises()
+    await flushPromises()
+
+    ;(wrapper.vm as unknown as { amount: number | null; selectedMethod: string }).amount = 37
+    ;(wrapper.vm as unknown as { amount: number | null; selectedMethod: string }).selectedMethod = 'stripe'
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.text()).toContain('1.110')
+    expect(wrapper.text()).toContain('38.110')
+  })
+
+  it('uses each recharge method fee when checking candidate availability', async () => {
+    const checkout = checkoutInfoWithStripeFeeFixture()
+    checkout.data.methods.usdt.single_max = 100
+    checkout.data.methods.stripe.single_max = 100
+    getCheckoutInfo.mockResolvedValue(checkout)
+
+    const wrapper = mount(PaymentView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          Teleport: true,
+          Transition: false,
+        },
+      },
+    })
+    await flushPromises()
+    await flushPromises()
+
+    ;(wrapper.vm as unknown as { amount: number | null }).amount = 100
+    await wrapper.vm.$nextTick()
+
+    const usdtButton = wrapper.findAll('button').find(button => button.text().includes('payment.methods.usdt'))
+    const stripeButton = wrapper.findAll('button').find(button => button.text().includes('payment.methods.stripe'))
+    expect(usdtButton?.attributes('disabled')).toBeUndefined()
+    expect(stripeButton?.attributes('disabled')).toBeDefined()
+  })
+
+  it('blocks a recharge submit when the selected method fee exceeds its limit', async () => {
+    const checkout = checkoutInfoWithStripeFeeFixture()
+    checkout.data.methods = {
+      stripe: {
+        ...checkout.data.methods.stripe,
+        single_max: 100,
+      },
+    }
+    getCheckoutInfo.mockResolvedValue(checkout)
+
+    const wrapper = mount(PaymentView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          Teleport: true,
+          Transition: false,
+        },
+      },
+    })
+    await flushPromises()
+    await flushPromises()
+
+    ;(wrapper.vm as unknown as { amount: number | null }).amount = 100
+    await wrapper.vm.$nextTick()
+    const submitButton = wrapper.findAll('button').find(button => button.text().includes('payment.createOrder'))
+    expect(submitButton?.attributes('disabled')).toBeDefined()
+    await submitButton!.trigger('click')
+    expect(createOrder).not.toHaveBeenCalled()
   })
 })

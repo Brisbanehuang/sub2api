@@ -46,7 +46,7 @@ type easyPayCustomMethod struct {
 }
 
 // NewEasyPay creates a new EasyPay provider.
-// config keys: pid, pkey, apiBase, notifyUrl, returnUrl, cid, cidAlipay, cidWxpay
+// config keys: pid, pkey, apiBase, notifyUrl, returnUrl, cid, cidAlipay, cidWxpay, cidUsdt
 func NewEasyPay(instanceID string, config map[string]string) (*EasyPay, error) {
 	for _, k := range []string{"pid", "pkey", "apiBase", "notifyUrl", "returnUrl"} {
 		if strings.TrimSpace(config[k]) == "" {
@@ -101,7 +101,7 @@ func (e *EasyPay) apiBase() string {
 func (e *EasyPay) Name() string        { return "EasyPay" }
 func (e *EasyPay) ProviderKey() string { return payment.TypeEasyPay }
 func (e *EasyPay) SupportedTypes() []payment.PaymentType {
-	types := []payment.PaymentType{payment.TypeAlipay, payment.TypeWxpay}
+	types := []payment.PaymentType{payment.TypeAlipay, payment.TypeWxpay, payment.TypeUSDT}
 	for _, method := range e.customMethods() {
 		if method.Type != "" {
 			types = append(types, method.Type)
@@ -485,6 +485,12 @@ func summarizeEasyPayResponse(body []byte) string {
 func (e *EasyPay) resolveCID(paymentType string) string {
 	if strings.HasPrefix(paymentType, "alipay") {
 		if v := e.config["cidAlipay"]; v != "" {
+			return v
+		}
+		return e.config["cid"]
+	}
+	if paymentType == payment.TypeUSDT {
+		if v := e.config["cidUsdt"]; v != "" {
 			return v
 		}
 		return e.config["cid"]

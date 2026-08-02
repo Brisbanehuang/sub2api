@@ -154,13 +154,21 @@ function ceilCnyAmount(value: number): number {
   return Math.ceil(value * 100) / 100
 }
 
+const STRIPE_FIXED_RECHARGE_FEE_RATE = 3
+
+function subscriptionPreviewFeeRate(): number {
+  const enabledTypes = props.paymentConfig?.enabled_payment_types || []
+  if (enabledTypes.includes('stripe')) return STRIPE_FIXED_RECHARGE_FEE_RATE
+  return Number(props.paymentConfig?.recharge_fee_rate) || 0
+}
+
 const subscriptionCnyPreview = computed(() => {
   const price = Number(planForm.price) || 0
   const rate = Number(props.paymentConfig?.subscription_usd_to_cny_rate) || 0
   if (price <= 0 || rate <= 0) return null
 
   const amount = roundCnyAmount(price * rate)
-  const feeRate = Number(props.paymentConfig?.recharge_fee_rate) || 0
+  const feeRate = subscriptionPreviewFeeRate()
   const fee = feeRate > 0 ? ceilCnyAmount((amount * feeRate) / 100) : 0
   const total = feeRate > 0 ? roundCnyAmount(amount + fee) : amount
 

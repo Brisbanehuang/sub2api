@@ -4,6 +4,7 @@ import {
   buildCreateOrderPayload,
   decidePaymentLaunch,
   getVisibleMethods,
+  normalizeVisibleMethod,
   readPaymentRecoverySnapshot,
   type PaymentRecoverySnapshot,
 } from '@/components/payment/paymentFlow'
@@ -33,6 +34,16 @@ function createOrderResult(overrides: Partial<CreateOrderResult> = {}): CreateOr
 }
 
 describe('getVisibleMethods', () => {
+  it('preserves USDT as a canonical visible method', () => {
+    const visible = getVisibleMethods({
+      usdt: methodLimit({ single_min: 50 }),
+      alipay: methodLimit({ single_min: 10 }),
+    })
+
+    expect(visible.usdt).toEqual(methodLimit({ single_min: 50 }))
+    expect(normalizeVisibleMethod('usdt')).toBe('usdt')
+  })
+
   it('normalizes provider aliases and keeps stripe as a top-level method', () => {
     const visible = getVisibleMethods({
       alipay_direct: methodLimit({ single_min: 5 }),

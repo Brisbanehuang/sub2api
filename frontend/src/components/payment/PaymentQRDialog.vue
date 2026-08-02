@@ -84,6 +84,7 @@ import type { PaymentOrder } from '@/types/payment'
 import { currencySymbol } from '@/components/payment/currency'
 import QRCode from 'qrcode'
 import alipayIcon from '@/assets/icons/alipay.svg'
+import usdtIcon from '@/assets/icons/usdt.svg'
 import wxpayIcon from '@/assets/icons/wxpay.svg'
 
 const props = defineProps<{
@@ -122,18 +123,21 @@ let lastVerifyAt = 0
 const VERIFY_RETRY_INTERVAL_MS = 15000
 const VERIFY_RETRY_MAX_ATTEMPTS = 6
 
+const isUSDT = computed(() => props.paymentType === 'usdt')
 const isAlipay = computed(() => isBuiltInAlipayMethod(props.paymentType))
 const isWxpay = computed(() => isBuiltInWxpayMethod(props.paymentType))
 
 const dialogTitle = computed(() => {
   if (success.value) return t('payment.result.success')
   if (!qrUrl.value) return t('payment.qr.payInNewWindow')
+  if (isUSDT.value) return t('payment.qr.scanUSDT')
   if (isAlipay.value) return t('payment.qr.scanAlipay')
   if (isWxpay.value) return t('payment.qr.scanWxpay')
   return t('payment.qr.scanToPay')
 })
 
 const scanHint = computed(() => {
+  if (isUSDT.value) return t('payment.qr.scanUSDTHint')
   if (isAlipay.value) return t('payment.qr.scanAlipayHint')
   if (isWxpay.value) return t('payment.qr.scanWxpayHint')
   return ''
@@ -150,6 +154,7 @@ const countdownDisplay = computed(() => {
 })
 
 function getLogoForType(): string | null {
+  if (isUSDT.value) return usdtIcon
   if (isAlipay.value) return alipayIcon
   if (isWxpay.value) return wxpayIcon
   return null

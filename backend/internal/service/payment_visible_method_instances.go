@@ -13,7 +13,7 @@ import (
 )
 
 func enabledVisibleMethodsForProvider(providerKey, supportedTypes string) []string {
-	methodSet := make(map[string]struct{}, 2)
+	methodSet := make(map[string]struct{}, 3)
 	addMethod := func(method string) {
 		method = NormalizeVisibleMethod(method)
 		if method != "" {
@@ -51,7 +51,7 @@ func enabledVisibleMethodsForProvider(providerKey, supportedTypes string) []stri
 	}
 
 	methods := make([]string, 0, len(methodSet))
-	for _, method := range []string{payment.TypeAlipay, payment.TypeWxpay} {
+	for _, method := range []string{payment.TypeUSDT, payment.TypeAlipay, payment.TypeWxpay} {
 		if _, ok := methodSet[method]; ok {
 			methods = append(methods, method)
 			delete(methodSet, method)

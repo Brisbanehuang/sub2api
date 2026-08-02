@@ -152,6 +152,49 @@ describe('PaymentStatusPanel', () => {
 
     expect(wrapper.text()).toContain('payment.qr.scanToPay')
     expect(wrapper.text()).not.toContain('payment.qr.scanAlipay')
+    wrapper.unmount()
+  })
+
+  it('keeps USDT and Alipay QR prompts separate', async () => {
+    const alipayWrapper = mount(PaymentStatusPanel, {
+      props: {
+        orderId: 42,
+        qrCode: 'https://pay.example.com/qr/alipay',
+        expiresAt: '2099-01-01T12:30:00Z',
+        paymentType: 'alipay',
+        orderType: 'balance',
+      },
+      global: {
+        stubs: {
+          Icon: true,
+        },
+      },
+    })
+
+    await flushPromises()
+    expect(alipayWrapper.text()).toContain('payment.qr.scanAlipay')
+    expect(alipayWrapper.text()).not.toContain('payment.qr.scanUSDT')
+    alipayWrapper.unmount()
+
+    const usdtWrapper = mount(PaymentStatusPanel, {
+      props: {
+        orderId: 42,
+        qrCode: 'https://pay.example.com/qr/usdt',
+        expiresAt: '2099-01-01T12:30:00Z',
+        paymentType: 'usdt',
+        orderType: 'balance',
+      },
+      global: {
+        stubs: {
+          Icon: true,
+        },
+      },
+    })
+
+    await flushPromises()
+    expect(usdtWrapper.text()).toContain('payment.qr.scanUSDT')
+    expect(usdtWrapper.text()).not.toContain('payment.qr.scanAlipay')
+    usdtWrapper.unmount()
   })
 
   it('actively verifies a stuck pending order and settles it when upstream confirms payment', async () => {

@@ -298,6 +298,7 @@ export default {
     createOrder: 'Confirm Payment',
     methods: {
       easypay: 'EasyPay',
+      usdt: 'USDT',
       alipay: 'Alipay',
       wxpay: 'WeChat Pay',
       stripe: 'Stripe',
@@ -324,8 +325,10 @@ export default {
     },
     qr: {
       scanToPay: 'Scan to Pay',
+      scanUSDT: 'USDT Payment',
       scanAlipay: 'Alipay QR Payment',
       scanWxpay: 'WeChat QR Payment',
+      scanUSDTHint: 'Choose a network on the payment page and follow the instructions to complete the USDT transfer',
       scanAlipayHint: 'Open Alipay on your phone and scan the QR code to pay',
       scanWxpayHint: 'Open WeChat on your phone and scan the QR code to pay',
       payInNewWindow: 'Complete Payment in New Window',

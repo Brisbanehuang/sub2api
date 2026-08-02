@@ -155,6 +155,23 @@ describe('PlanEditDialog', () => {
     expect(wrapper.text()).toContain('¥73.22')
   })
 
+  it('uses the fixed Stripe recharge fee when Stripe is enabled', async () => {
+    const wrapper = mountDialog({
+      paymentConfig: {
+        subscription_usd_to_cny_rate: 7.15,
+        recharge_fee_rate: 0,
+        enabled_payment_types: ['usdt', 'stripe'],
+      },
+    })
+
+    await wrapper.find('input[type="number"]').setValue('9.99')
+
+    expect(wrapper.text()).toContain('preview')
+    expect(wrapper.text()).toContain('¥71.43')
+    expect(wrapper.text()).toContain('fee 3')
+    expect(wrapper.text()).toContain('¥73.58')
+  })
+
   it('hides the preview when the subscription rate is not configured', async () => {
     const wrapper = mountDialog({
       paymentConfig: {

@@ -322,6 +322,7 @@ export default {
     createOrder: '确认支付',
     methods: {
       easypay: '易支付',
+      usdt: 'USDT',
       alipay: '支付宝',
       wxpay: '微信支付',
       stripe: 'Stripe',
@@ -348,8 +349,10 @@ export default {
     },
     qr: {
       scanToPay: '请扫码支付',
+      scanUSDT: 'USDT 支付',
       scanAlipay: '支付宝扫码支付',
       scanWxpay: '微信扫码支付',
+      scanUSDTHint: '请在支付页面选择网络，并按提示完成 USDT 转账',
       scanAlipayHint: '请使用手机打开支付宝，扫描二维码完成支付',
       scanWxpayHint: '请使用手机打开微信，扫描二维码完成支付',
       payInNewWindow: '请在新窗口中完成支付',

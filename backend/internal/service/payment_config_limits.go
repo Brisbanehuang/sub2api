@@ -291,13 +291,13 @@ func unionFloat(agg float64, limited bool, val float64, wantMin bool) (float64, 
 //   - SingleMax: highest ceiling across instances; 0 if any is unlimited
 //   - DailyLimit: highest cap across instances; 0 if any is unlimited
 func pcAggregateMethodLimits(pt string, instances []*dbent.PaymentProviderInstance) MethodLimits {
-	ml := MethodLimits{PaymentType: pt}
+	ml := defaultMethodLimits(pt)
 	minLimited, maxLimited, dailyLimited := true, true, true
 
 	for _, inst := range instances {
 		cl, hasLimits := pcInstanceTypeLimits(inst, pt)
 		if !hasLimits {
-			return MethodLimits{PaymentType: pt} // any unlimited instance → all zeros
+			return defaultMethodLimits(pt) // any unlimited instance → all limits zero
 		}
 		ml.SingleMin, minLimited = unionFloat(ml.SingleMin, minLimited, cl.SingleMin, true)
 		ml.SingleMax, maxLimited = unionFloat(ml.SingleMax, maxLimited, cl.SingleMax, false)
@@ -314,6 +314,13 @@ func pcAggregateMethodLimits(pt string, instances []*dbent.PaymentProviderInstan
 		ml.DailyLimit = 0
 	}
 	return ml
+}
+
+func defaultMethodLimits(pt string) MethodLimits {
+	return MethodLimits{
+		PaymentType: pt,
+		FeeRate:     defaultFeeRateForPaymentType(pt),
+	}
 }
 
 // pcComputeGlobalRange computes the widest [min, max] across all methods.

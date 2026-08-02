@@ -7472,7 +7472,7 @@
                   }}</label>
                   <div class="mt-1.5 flex flex-wrap gap-2">
                     <button
-                      v-for="pt in allPaymentTypes"
+                      v-for="pt in providerEnableOptions"
                       :key="pt.value"
                       type="button"
                       @click="togglePaymentType(pt.value)"
@@ -11315,6 +11315,14 @@ async function saveBetaPolicySettings() {
 // ==================== Provider Management ====================
 
 const allPaymentTypes = computed(() => [
+  { value: "usdt", label: t("payment.methods.usdt") },
+  { value: "alipay", label: t("payment.methods.alipay") },
+  { value: "wxpay", label: t("payment.methods.wxpay") },
+  { value: "stripe", label: t("payment.methods.stripe") },
+  { value: "airwallex", label: t("payment.methods.airwallex") },
+]);
+
+const providerEnableOptions = computed(() => [
   { value: "easypay", label: t("payment.methods.easypay") },
   { value: "alipay", label: t("payment.methods.alipay") },
   { value: "wxpay", label: t("payment.methods.wxpay") },

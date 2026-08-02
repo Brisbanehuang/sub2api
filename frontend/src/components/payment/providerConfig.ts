@@ -37,7 +37,7 @@ export interface CallbackPaths {
 
 /** Maps provider key → available payment types. */
 export const PROVIDER_SUPPORTED_TYPES: Record<string, string[]> = {
-  easypay: ['alipay', 'wxpay'],
+  easypay: ['usdt', 'alipay', 'wxpay'],
   alipay: ['alipay'],
   wxpay: ['wxpay'],
   stripe: ['card', 'alipay', 'wxpay', 'link'],
@@ -48,7 +48,7 @@ export const PROVIDER_SUPPORTED_TYPES: Record<string, string[]> = {
 export const EASYPAY_PAYMENT_MODES = ['qrcode', 'popup'] as const
 
 /** Fixed display order for user-facing payment methods */
-export const METHOD_ORDER = ['alipay', 'alipay_direct', 'wxpay', 'wxpay_direct', 'stripe', 'airwallex'] as const
+export const METHOD_ORDER = ['usdt', 'alipay', 'alipay_direct', 'wxpay', 'wxpay_direct', 'stripe', 'airwallex'] as const
 
 export function isBuiltInAlipayMethod(type: string): boolean {
   return type === 'alipay' || type === 'alipay_direct'
@@ -129,6 +129,7 @@ export const PROVIDER_CONFIG_FIELDS: Record<string, ConfigFieldDef[]> = {
     { key: 'pid', label: 'PID', sensitive: false },
     { key: 'pkey', label: 'PKey', sensitive: true },
     { key: 'apiBase', label: '', sensitive: false },
+    { key: 'cidUsdt', label: '', sensitive: false, optional: true },
     { key: 'cidAlipay', label: '', sensitive: false, optional: true },
     { key: 'cidWxpay', label: '', sensitive: false, optional: true },
   ],
@@ -211,6 +212,15 @@ export function serializeEasyPayCustomMethods(methods: EasyPayCustomMethod[]): s
     }))
     .filter(method => method.type && method.upstreamType)
   return clean.length ? JSON.stringify(clean) : ''
+}
+
+/** Whether a provider instance is active under the current global payment types. */
+export function providerMatchesEnabledPaymentTypes(
+  providerKey: string,
+  _supportedTypes: string[],
+  enabledPaymentTypes: string[],
+): boolean {
+  return new Set(enabledPaymentTypes).has(providerKey)
 }
 
 /** Extract base URL from a full callback URL by removing the known path suffix. */

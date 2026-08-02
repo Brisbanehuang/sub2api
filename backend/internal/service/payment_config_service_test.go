@@ -225,6 +225,23 @@ func TestParsePaymentConfig(t *testing.T) {
 		}
 	})
 
+	t.Run("enabled provider keys preserve easypay for admin provider toggles", func(t *testing.T) {
+		t.Parallel()
+		vals := map[string]string{
+			SettingEnabledPaymentTypes: "easypay,stripe",
+		}
+		cfg := svc.parsePaymentConfig(vals)
+		want := []string{payment.TypeEasyPay, payment.TypeStripe}
+		if len(cfg.EnabledTypes) != len(want) {
+			t.Fatalf("EnabledTypes len = %d, want %d (%v)", len(cfg.EnabledTypes), len(want), cfg.EnabledTypes)
+		}
+		for i := range want {
+			if cfg.EnabledTypes[i] != want[i] {
+				t.Fatalf("EnabledTypes[%d] = %q, want %q (full=%v)", i, cfg.EnabledTypes[i], want[i], cfg.EnabledTypes)
+			}
+		}
+	})
+
 	t.Run("empty enabled types string", func(t *testing.T) {
 		t.Parallel()
 		vals := map[string]string{
@@ -248,6 +265,8 @@ func TestGetBasePaymentType(t *testing.T) {
 		{payment.TypeStripe, payment.TypeStripe},
 		{payment.TypeCard, payment.TypeStripe},
 		{payment.TypeLink, payment.TypeStripe},
+		{payment.TypeUSDT, payment.TypeUSDT},
+		{"usdt.trc20", payment.TypeUSDT},
 		{payment.TypeAlipay, payment.TypeAlipay},
 		{payment.TypeAlipayDirect, payment.TypeAlipay},
 		{payment.TypeWxpay, payment.TypeWxpay},

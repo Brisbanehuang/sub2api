@@ -1,5 +1,14 @@
 export const DEFAULT_PAYMENT_CURRENCY = 'CNY'
 
+const ZERO_DECIMAL_PAYMENT_CURRENCIES = new Set([
+  'BIF', 'CLP', 'DJF', 'GNF', 'ISK', 'JPY', 'KMF', 'KRW', 'MGA',
+  'PYG', 'RWF', 'UGX', 'VND', 'VUV', 'XAF', 'XOF', 'XPF',
+])
+
+const THREE_DECIMAL_PAYMENT_CURRENCIES = new Set([
+  'BHD', 'IQD', 'JOD', 'KWD', 'LYD', 'OMR', 'TND',
+])
+
 const PAYMENT_CURRENCY_SYMBOLS: Record<string, string> = {
   USD: '$',
   CNY: '¥',
@@ -31,15 +40,11 @@ export function currencySymbol(currency?: string | null): string {
   return PAYMENT_CURRENCY_SYMBOLS[normalized] || normalized
 }
 
-function paymentCurrencyFractionDigits(currency: string): number {
-  try {
-    return new Intl.NumberFormat(undefined, {
-      style: 'currency',
-      currency,
-    }).resolvedOptions().maximumFractionDigits ?? 2
-  } catch {
-    return 2
-  }
+export function paymentCurrencyFractionDigits(currency?: string | null): number {
+  const normalized = normalizePaymentCurrency(currency)
+  if (ZERO_DECIMAL_PAYMENT_CURRENCIES.has(normalized)) return 0
+  if (THREE_DECIMAL_PAYMENT_CURRENCIES.has(normalized)) return 3
+  return 2
 }
 
 export function formatPaymentAmount(amount: number, currency?: string | null, locale?: string): string {

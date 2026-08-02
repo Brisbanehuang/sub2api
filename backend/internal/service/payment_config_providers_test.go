@@ -129,6 +129,11 @@ func TestValidateEasyPayCustomMethods(t *testing.T) {
 			supportedTypes: "alipay,wxpay,ldc",
 		},
 		{
+			name:           "first-class usdt does not require custom method mapping",
+			config:         map[string]string{},
+			supportedTypes: "alipay,wxpay,usdt",
+		},
+		{
 			name:           "malformed custom methods json",
 			config:         map[string]string{"customMethods": `not-json`},
 			supportedTypes: "alipay,wxpay,ldc",
@@ -169,6 +174,12 @@ func TestValidateEasyPayCustomMethods(t *testing.T) {
 			config:         map[string]string{"customMethods": `[{"type":"wxpay_usdt","upstreamType":"usdt"}]`},
 			supportedTypes: "alipay,wxpay,wxpay_usdt",
 			wantErr:        "customMethods type cannot start with alipay or wxpay",
+		},
+		{
+			name:           "custom type cannot shadow first-class usdt",
+			config:         map[string]string{"customMethods": `[{"type":"usdt","upstreamType":"wxpay"}]`},
+			supportedTypes: "alipay,wxpay,usdt",
+			wantErr:        "customMethods type cannot start with alipay or wxpay, or equal usdt",
 		},
 		{
 			name:           "supported custom type missing mapping",
