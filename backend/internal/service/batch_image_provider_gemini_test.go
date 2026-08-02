@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -116,6 +118,46 @@ func TestGeminiProvider_SubmitUploadsJSONLThenCreatesBatch(t *testing.T) {
 	require.Empty(t, got.ProviderOutputRef)
 	require.NotContains(t, got.ProviderInputRef, "A clean product hero image")
 	require.NotContains(t, string(client.uploadedJSONL), "sk-secret")
+}
+
+func TestGeminiBatchHTTPClient_CreateBatchRejectsUnsafeModelBeforeRequest(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"name":"batches/unexpected"}`))
+	}))
+	defer server.Close()
+
+	client := NewGeminiBatchHTTPClient(server.URL, server.Client())
+	for _, model := range []string{
+		"../models/other",
+		"gemini-3.1-flash-image/../other",
+		"gemini-3.1-flash-image\n",
+		" gemini-3.1-flash-image",
+	} {
+		t.Run(model, func(t *testing.T) {
+			_, err := client.CreateBatch(context.Background(), "sk-test", model, "files/input", "batch")
+			require.Error(t, err)
+		})
+	}
+	require.Zero(t, requests, "unsafe models must be rejected before any upstream request")
+}
+
+func TestGeminiBatchHTTPClient_CreateBatchAllowsSafeModel(t *testing.T) {
+	var requestPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"name":"batches/job-123","state":"JOB_STATE_PENDING"}`))
+	}))
+	defer server.Close()
+
+	client := NewGeminiBatchHTTPClient(server.URL, server.Client())
+	job, err := client.CreateBatch(context.Background(), "sk-test", "gemini-3.1-flash-image", "files/input", "batch")
+	require.NoError(t, err)
+	require.NotNil(t, job)
+	require.Equal(t, "/v1beta/models/gemini-3.1-flash-image:batchGenerateContent", requestPath)
 }
 
 func TestGeminiProvider_GetMapsStates(t *testing.T) {

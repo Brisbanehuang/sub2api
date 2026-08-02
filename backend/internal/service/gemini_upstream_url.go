@@ -12,6 +12,23 @@ var geminiAIStudioActions = map[string]struct{}{
 	"generateContent":       {},
 	"streamGenerateContent": {},
 	"countTokens":           {},
+	"batchGenerateContent":  {},
+}
+
+// buildGeminiAIStudioModelActionPath 构造 AI Studio 的模型 action 路径。
+// 所有把模型名拼入 /v1beta/models/{model}:{action} 的调用点都必须复用这里，
+// 避免兼容接口或批处理接口绕过统一的路径片段与 action 闭集护栏。
+func buildGeminiAIStudioModelActionPath(model, action string) (string, error) {
+	if model == "" {
+		return "", errors.New("gemini model is required")
+	}
+	if err := validateUpstreamPathSegment("gemini model", model); err != nil {
+		return "", err
+	}
+	if _, ok := geminiAIStudioActions[action]; !ok {
+		return "", fmt.Errorf("unsupported gemini action: %s", action)
+	}
+	return fmt.Sprintf("/v1beta/models/%s:%s", model, action), nil
 }
 
 // buildGeminiAIStudioModelActionURL 组装 AI Studio 的
@@ -26,18 +43,13 @@ func buildGeminiAIStudioModelActionURL(baseURL, model, action string, stream boo
 		return "", errors.New("gemini base url is required")
 	}
 	trimmedModel := strings.TrimSpace(model)
-	if trimmedModel == "" {
-		return "", errors.New("gemini model is required")
-	}
-	if err := validateUpstreamPathSegment("gemini model", trimmedModel); err != nil {
+	trimmedAction := strings.TrimSpace(action)
+	path, err := buildGeminiAIStudioModelActionPath(trimmedModel, trimmedAction)
+	if err != nil {
 		return "", err
 	}
-	trimmedAction := strings.TrimSpace(action)
-	if _, ok := geminiAIStudioActions[trimmedAction]; !ok {
-		return "", fmt.Errorf("unsupported gemini action: %s", trimmedAction)
-	}
 
-	fullURL := fmt.Sprintf("%s/v1beta/models/%s:%s", trimmedBase, trimmedModel, trimmedAction)
+	fullURL := trimmedBase + path
 	if stream {
 		fullURL += "?alt=sse"
 	}
@@ -47,5 +59,5 @@ func buildGeminiAIStudioModelActionURL(baseURL, model, action string, stream boo
 // IsSafeGeminiModelPathSegment 供 handler 层在解析出 URL 里的模型名后立刻校验，
 // 让客户端拿到明确的 400，而不是等到构造上游请求时才报错。
 func IsSafeGeminiModelPathSegment(model string) bool {
-	return isSafeUpstreamPathSegment(strings.TrimSpace(model))
+	return isSafeUpstreamPathSegment(model)
 }

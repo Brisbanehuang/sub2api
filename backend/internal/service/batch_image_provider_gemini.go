@@ -527,6 +527,10 @@ func (c *GeminiBatchHTTPClient) UploadJSONL(ctx context.Context, apiKey string, 
 }
 
 func (c *GeminiBatchHTTPClient) CreateBatch(ctx context.Context, apiKey string, model string, fileName string, displayName string) (*GeminiBatchJob, error) {
+	path, err := buildGeminiAIStudioModelActionPath(model, "batchGenerateContent")
+	if err != nil {
+		return nil, err
+	}
 	body := map[string]any{
 		"batch": map[string]any{
 			"displayName": displayName,
@@ -536,7 +540,6 @@ func (c *GeminiBatchHTTPClient) CreateBatch(ctx context.Context, apiKey string, 
 		},
 	}
 	payload, _ := json.Marshal(body)
-	path := fmt.Sprintf("/v1beta/models/%s:batchGenerateContent", url.PathEscape(strings.TrimSpace(model)))
 	req, err := c.newRequest(ctx, http.MethodPost, path, apiKey, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err

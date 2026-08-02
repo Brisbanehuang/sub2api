@@ -20,6 +20,10 @@ func TestBuildGeminiAIStudioModelActionURL(t *testing.T) {
 	got, err = buildGeminiAIStudioModelActionURL(base, "gemini-2.5-pro", "countTokens", false)
 	require.NoError(t, err)
 	require.Equal(t, base+"/v1beta/models/gemini-2.5-pro:countTokens", got)
+
+	path, err := buildGeminiAIStudioModelActionPath("gemini-3.1-flash-image", "batchGenerateContent")
+	require.NoError(t, err)
+	require.Equal(t, "/v1beta/models/gemini-3.1-flash-image:batchGenerateContent", path)
 }
 
 // TestBuildGeminiAIStudioModelActionURLRejectsNonConformingModel 锁定不变式：
