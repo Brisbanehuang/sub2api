@@ -1131,12 +1131,13 @@ func applyPendingOAuthBinding(
 	overrideUserID *int64,
 	forceBind bool,
 	applyFirstBindDefaults bool,
-) error {
+) (service.ProviderDefaultCacheInvalidationPlan, error) {
+	emptyPlan := service.ProviderDefaultCacheInvalidationPlan{}
 	if client == nil || session == nil {
-		return nil
+		return emptyPlan, nil
 	}
 	if !forceBind && !shouldBindPendingOAuthIdentity(session, decision) {
-		return nil
+		return emptyPlan, nil
 	}
 
 	if tx := dbent.TxFromContext(ctx); tx != nil {
@@ -1145,15 +1146,22 @@ func applyPendingOAuthBinding(
 
 	tx, err := client.Tx(ctx)
 	if err != nil {
-		return err
+		return emptyPlan, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
 	txCtx := dbent.NewTxContext(ctx, tx)
-	if err := applyPendingOAuthBindingTx(txCtx, tx, authService, userService, session, decision, overrideUserID, forceBind, applyFirstBindDefaults); err != nil {
-		return err
+	plan, err := applyPendingOAuthBindingTx(txCtx, tx, authService, userService, session, decision, overrideUserID, forceBind, applyFirstBindDefaults)
+	if err != nil {
+		return emptyPlan, err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return emptyPlan, err
+	}
+	if authService != nil {
+		authService.InvalidateProviderDefaultSettingsCaches(plan)
+	}
+	return emptyPlan, nil
 }
 
 func applyPendingOAuthBindingTx(
@@ -1166,12 +1174,13 @@ func applyPendingOAuthBindingTx(
 	overrideUserID *int64,
 	forceBind bool,
 	applyFirstBindDefaults bool,
-) error {
+) (service.ProviderDefaultCacheInvalidationPlan, error) {
+	plan := service.ProviderDefaultCacheInvalidationPlan{}
 	if tx == nil || session == nil {
-		return nil
+		return plan, nil
 	}
 	if !forceBind && !shouldBindPendingOAuthIdentity(session, decision) {
-		return nil
+		return plan, nil
 	}
 
 	targetUserID := int64(0)
@@ -1180,7 +1189,7 @@ func applyPendingOAuthBindingTx(
 	} else {
 		resolvedUserID, err := resolvePendingOAuthTargetUserID(ctx, tx.Client(), session)
 		if err != nil {
-			return err
+			return plan, err
 		}
 		targetUserID = resolvedUserID
 	}
@@ -1198,7 +1207,7 @@ func applyPendingOAuthBindingTx(
 		if err := service.ValidateUserAvatar(adoptedAvatarURL); err == nil {
 			shouldAdoptAvatar = true
 		} else if !shouldSkipAvatarAdoption(err) {
-			return err
+			return plan, err
 		}
 	}
 
@@ -1206,13 +1215,13 @@ func applyPendingOAuthBindingTx(
 		if err := tx.Client().User.UpdateOneID(targetUserID).
 			SetUsername(adoptedDisplayName).
 			Exec(ctx); err != nil {
-			return err
+			return plan, err
 		}
 	}
 
 	identity, err := ensurePendingOAuthIdentityForUser(ctx, tx, session, targetUserID)
 	if err != nil {
-		return err
+		return plan, err
 	}
 
 	metadata := cloneOAuthMetadata(identity.Metadata)
@@ -1231,7 +1240,7 @@ func applyPendingOAuthBindingTx(
 		updateIdentity = updateIdentity.SetIssuer(strings.TrimSpace(*issuer))
 	}
 	if _, err := updateIdentity.Save(ctx); err != nil {
-		return err
+		return plan, err
 	}
 
 	if decision != nil && (decision.IdentityID == nil || *decision.IdentityID != identity.ID) {
@@ -1242,28 +1251,29 @@ func applyPendingOAuthBindingTx(
 			).
 			ClearIdentityID().
 			Save(ctx); err != nil {
-			return err
+			return plan, err
 		}
 		if _, err := tx.Client().IdentityAdoptionDecision.UpdateOneID(decision.ID).
 			SetIdentityID(identity.ID).
 			Save(ctx); err != nil {
-			return err
+			return plan, err
 		}
 	}
 
 	if applyFirstBindDefaults && authService != nil {
-		if err := authService.ApplyProviderDefaultSettingsOnFirstBind(ctx, targetUserID, session.ProviderType); err != nil {
-			return err
+		plan, err = authService.ApplyProviderDefaultSettingsOnFirstBindDeferred(ctx, targetUserID, session.ProviderType)
+		if err != nil {
+			return plan, err
 		}
 	}
 
 	if shouldAdoptAvatar && userService != nil {
 		if _, err := userService.SetAvatar(ctx, targetUserID, adoptedAvatarURL); err != nil {
-			return err
+			return plan, err
 		}
 	}
 
-	return nil
+	return plan, nil
 }
 
 func consumePendingOAuthBrowserSessionTx(
@@ -1329,13 +1339,20 @@ func applyPendingOAuthAdoptionAndConsumeSession(
 	defer func() { _ = tx.Rollback() }()
 
 	txCtx := dbent.NewTxContext(ctx, tx)
-	if err := applyPendingOAuthAdoption(txCtx, client, authService, userService, session, decision, &userID); err != nil {
+	plan, err := applyPendingOAuthAdoption(txCtx, client, authService, userService, session, decision, &userID)
+	if err != nil {
 		return err
 	}
 	if err := consumePendingOAuthBrowserSessionTx(txCtx, tx, session); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if authService != nil {
+		authService.InvalidateProviderDefaultSettingsCaches(plan)
+	}
+	return nil
 }
 
 func applyPendingOAuthAdoption(
@@ -1346,7 +1363,7 @@ func applyPendingOAuthAdoption(
 	session *dbent.PendingAuthSession,
 	decision *dbent.IdentityAdoptionDecision,
 	overrideUserID *int64,
-) error {
+) (service.ProviderDefaultCacheInvalidationPlan, error) {
 	return applyPendingOAuthBinding(
 		ctx,
 		client,
@@ -1669,7 +1686,7 @@ func (h *AuthHandler) bindPendingOAuthLogin(c *gin.Context, provider string) {
 		})
 		return
 	}
-	if err := applyPendingOAuthBinding(c.Request.Context(), h.entClient(), h.authService, h.userService, session, decision, &user.ID, true, true); err != nil {
+	if _, err := applyPendingOAuthBinding(c.Request.Context(), h.entClient(), h.authService, h.userService, session, decision, &user.ID, true, true); err != nil {
 		respondPendingOAuthBindingApplyError(c, err)
 		return
 	}
@@ -1821,7 +1838,7 @@ func (h *AuthHandler) createPendingOAuthAccount(c *gin.Context, provider string)
 	defer func() { _ = tx.Rollback() }()
 	txCtx := dbent.NewTxContext(c.Request.Context(), tx)
 
-	if err := applyPendingOAuthBinding(txCtx, client, h.authService, h.userService, session, decision, &user.ID, true, false); err != nil {
+	if _, err := applyPendingOAuthBinding(txCtx, client, h.authService, h.userService, session, decision, &user.ID, true, false); err != nil {
 		_ = tx.Rollback()
 		if rollbackCreatedUser(err) {
 			return
@@ -2010,7 +2027,7 @@ func (h *AuthHandler) ExchangePendingOAuthCompletion(c *gin.Context) {
 		response.ErrorFrom(c, err)
 		return
 	}
-	if err := applyPendingOAuthAdoption(c.Request.Context(), h.entClient(), h.authService, h.userService, session, decision, session.TargetUserID); err != nil {
+	if _, err := applyPendingOAuthAdoption(c.Request.Context(), h.entClient(), h.authService, h.userService, session, decision, session.TargetUserID); err != nil {
 		response.ErrorFrom(c, infraerrors.InternalServer("PENDING_AUTH_ADOPTION_APPLY_FAILED", "failed to apply oauth profile adoption").WithCause(err))
 		return
 	}

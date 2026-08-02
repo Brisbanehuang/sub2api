@@ -148,6 +148,25 @@ type paymentFulfillmentSettingRepoStub struct {
 	values map[string]string
 }
 
+type paymentFulfillmentFailOnceBillingCache struct {
+	BillingCache
+	err   error
+	calls []paymentFulfillmentCacheInvalidation
+}
+
+type paymentFulfillmentCacheInvalidation struct {
+	userID  int64
+	groupID int64
+}
+
+func (c *paymentFulfillmentFailOnceBillingCache) InvalidateSubscriptionCache(_ context.Context, userID, groupID int64) error {
+	c.calls = append(c.calls, paymentFulfillmentCacheInvalidation{userID: userID, groupID: groupID})
+	if len(c.calls) == 1 {
+		return c.err
+	}
+	return nil
+}
+
 func (s *paymentFulfillmentSettingRepoStub) Get(context.Context, string) (*Setting, error) {
 	return nil, ErrSettingNotFound
 }
@@ -830,6 +849,157 @@ func TestExecuteSubscriptionFulfillmentRecoversCommittedAssignmentWithoutExtendi
 	require.Equal(t, 1, assignmentAuditCount)
 }
 
+func TestExecuteSubscriptionFulfillmentRetryRecoversCacheInvalidationFailure(t *testing.T) {
+	ctx := context.Background()
+	client := newPaymentConfigServiceTestClient(t)
+	ensurePaymentAuditOrderActionUniqueIndex(t, ctx, client)
+	order := createPaymentFulfillmentSubscriptionOrder(t, ctx, client, OrderStatusPaid, time.Now())
+
+	cacheErr := errors.New("subscription cache unavailable")
+	cache := &paymentFulfillmentFailOnceBillingCache{err: cacheErr}
+	subRepo := newSubscriptionUserSubRepoStub()
+	groupRepo := &subscriptionGroupRepoStub{
+		group: &Group{ID: 7, Status: payment.EntityStatusActive, SubscriptionType: SubscriptionTypeSubscription},
+	}
+	svc := &PaymentService{
+		entClient: client,
+		groupRepo: groupRepo,
+		subscriptionSvc: NewSubscriptionService(
+			groupRepo,
+			subRepo,
+			&BillingCacheService{cache: cache},
+			nil,
+			nil,
+		),
+	}
+	auditCount := func(action string) int {
+		count, err := client.PaymentAuditLog.Query().
+			Where(
+				paymentauditlog.OrderIDEQ(strconv.FormatInt(order.ID, 10)),
+				paymentauditlog.ActionEQ(action),
+			).
+			Count(ctx)
+		require.NoError(t, err)
+		return count
+	}
+
+	err := svc.ExecuteSubscriptionFulfillment(ctx, order.ID)
+	require.ErrorIs(t, err, cacheErr)
+	require.Equal(t, []paymentFulfillmentCacheInvalidation{{
+		userID:  order.UserID,
+		groupID: *order.SubscriptionGroupID,
+	}}, cache.calls)
+
+	reloaded, err := client.PaymentOrder.Get(ctx, order.ID)
+	require.NoError(t, err)
+	require.Equal(t, OrderStatusFailed, reloaded.Status)
+	assigned, err := subRepo.GetByUserIDAndGroupID(ctx, order.UserID, *order.SubscriptionGroupID)
+	require.NoError(t, err)
+	assignedExpiresAt := assigned.ExpiresAt
+	require.False(t, assignedExpiresAt.IsZero())
+	require.Equal(t, 1, auditCount("SUBSCRIPTION_ASSIGNED"))
+	require.Zero(t, auditCount("SUBSCRIPTION_SUCCESS"))
+	require.Equal(t, 1, auditCount("FULFILLMENT_FAILED"))
+
+	require.NoError(t, svc.RetryFulfillment(ctx, order.ID))
+
+	reloaded, err = client.PaymentOrder.Get(ctx, order.ID)
+	require.NoError(t, err)
+	require.Equal(t, OrderStatusCompleted, reloaded.Status)
+	retried, err := subRepo.GetByUserIDAndGroupID(ctx, order.UserID, *order.SubscriptionGroupID)
+	require.NoError(t, err)
+	require.True(t, retried.ExpiresAt.Equal(assignedExpiresAt), "subscription expiry changed from %s to %s", assignedExpiresAt, retried.ExpiresAt)
+	require.Equal(t, 1, auditCount("SUBSCRIPTION_ASSIGNED"))
+	require.Equal(t, 1, auditCount("SUBSCRIPTION_SUCCESS"))
+	require.Equal(t, 1, auditCount("FULFILLMENT_FAILED"))
+	require.Equal(t, 1, auditCount("RECHARGE_RETRY"))
+	require.Equal(t, []paymentFulfillmentCacheInvalidation{
+		{userID: order.UserID, groupID: *order.SubscriptionGroupID},
+		{userID: order.UserID, groupID: *order.SubscriptionGroupID},
+	}, cache.calls)
+}
+
+func TestPaymentServiceConcurrentPaidSubscriptionFulfillmentAddsBothValidityPeriods(t *testing.T) {
+	ctx := context.Background()
+	fixture := newBalancePayFixture(t, 1)
+	ensurePaymentAuditOrderActionUniqueIndex(t, ctx, fixture.client)
+	user := fixture.createUser(t, ctx, 100)
+	group := fixture.createSubscriptionGroup(t, ctx)
+	plan := fixture.createPlan(t, ctx, group.ID, 10)
+	initialExpiresAt := time.Now().UTC().Truncate(time.Second).Add(10 * 24 * time.Hour)
+	require.NoError(t, fixture.paymentSvc.subscriptionSvc.userSubRepo.Create(ctx, &UserSubscription{
+		UserID:     user.ID,
+		GroupID:    group.ID,
+		StartsAt:   time.Now().Add(-24 * time.Hour),
+		ExpiresAt:  initialExpiresAt,
+		Status:     SubscriptionStatusActive,
+		AssignedAt: time.Now().Add(-24 * time.Hour),
+		Notes:      "existing subscription",
+	}))
+
+	createOrder := func(suffix string) *dbent.PaymentOrder {
+		order, err := fixture.client.PaymentOrder.Create().
+			SetUserID(user.ID).
+			SetUserEmail(user.Email).
+			SetUserName(user.Username).
+			SetAmount(plan.Price).
+			SetPayAmount(plan.Price).
+			SetFeeRate(0).
+			SetRechargeCode("PAY-CONCURRENT-" + suffix).
+			SetOutTradeNo("sub2_concurrent_fulfillment_" + suffix).
+			SetPaymentType(payment.TypeAlipay).
+			SetPaymentTradeNo("trade-concurrent-" + suffix).
+			SetOrderType(payment.OrderTypeSubscription).
+			SetPlanID(plan.ID).
+			SetSubscriptionGroupID(group.ID).
+			SetSubscriptionDays(30).
+			SetStatus(OrderStatusPaid).
+			SetPaidAt(time.Now().Add(-time.Minute)).
+			SetExpiresAt(time.Now().Add(time.Hour)).
+			SetClientIP("127.0.0.1").
+			SetSrcHost("api.example.com").
+			Save(ctx)
+		require.NoError(t, err)
+		return order
+	}
+	orders := []*dbent.PaymentOrder{createOrder("a"), createOrder("b")}
+	releaseUserLock := holdPaymentUserLock(t, user.ID)
+
+	start := make(chan struct{})
+	results := make(chan error, len(orders))
+	for _, order := range orders {
+		order := order
+		go func() {
+			<-start
+			results <- fixture.paymentSvc.ExecuteSubscriptionFulfillment(ctx, order.ID)
+		}()
+	}
+	close(start)
+	requirePaymentUserLockRefs(t, user.ID, 3)
+	blockedSubscription, err := fixture.paymentSvc.subscriptionSvc.userSubRepo.GetByUserIDAndGroupID(ctx, user.ID, group.ID)
+	require.NoError(t, err)
+	require.WithinDuration(t, initialExpiresAt, blockedSubscription.ExpiresAt, time.Second)
+	releaseUserLock()
+	for range orders {
+		require.NoError(t, <-results)
+	}
+
+	subscription, err := fixture.paymentSvc.subscriptionSvc.userSubRepo.GetByUserIDAndGroupID(ctx, user.ID, group.ID)
+	require.NoError(t, err)
+	require.WithinDuration(t, initialExpiresAt.AddDate(0, 0, 60), subscription.ExpiresAt, time.Second)
+	for _, order := range orders {
+		require.True(t, hasPaymentSubscriptionOrderNote(subscription.Notes, paymentSubscriptionOrderNote(order.ID)))
+		reloaded, err := fixture.client.PaymentOrder.Get(ctx, order.ID)
+		require.NoError(t, err)
+		require.Equal(t, OrderStatusCompleted, reloaded.Status)
+	}
+	assignmentAuditCount, err := fixture.client.PaymentAuditLog.Query().
+		Where(paymentauditlog.ActionEQ("SUBSCRIPTION_ASSIGNED")).
+		Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 2, assignmentAuditCount)
+}
+
 func TestHasPaymentSubscriptionOrderNoteRequiresIndependentExactLine(t *testing.T) {
 	t.Parallel()
 	require.True(t, hasPaymentSubscriptionOrderNote("before\r\npayment order 42\r\nafter", "payment order 42"))
@@ -883,6 +1053,19 @@ func assertPaymentSubscriptionExpiry(t *testing.T, repo *subscriptionUserSubRepo
 	sub, err := repo.GetByUserIDAndGroupID(context.Background(), order.UserID, *order.SubscriptionGroupID)
 	require.NoError(t, err)
 	require.True(t, sub.ExpiresAt.Equal(expected), "subscription expiry changed from %s to %s", expected, sub.ExpiresAt)
+}
+
+func TestAffiliateRebateBaseAmountSkipsBalancePaySubscription(t *testing.T) {
+	t.Parallel()
+
+	order := &dbent.PaymentOrder{
+		OrderType:   payment.OrderTypeSubscription,
+		PaymentType: payment.TypeBalancePay,
+		Amount:      35.90,
+		PayAmount:   35.90,
+	}
+
+	assert.Zero(t, affiliateRebateBaseAmount(order))
 }
 
 func TestExecuteSubscriptionFulfillmentAppliesAffiliateRebate(t *testing.T) {

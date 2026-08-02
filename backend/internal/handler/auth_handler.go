@@ -359,7 +359,7 @@ func (h *AuthHandler) Login2FA(c *gin.Context) {
 			response.ErrorFrom(c, err)
 			return
 		}
-		if err := applyPendingOAuthBinding(
+		if _, err := applyPendingOAuthBinding(
 			c.Request.Context(),
 			h.entClient(),
 			h.authService,

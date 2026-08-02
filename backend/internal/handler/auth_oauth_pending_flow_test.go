@@ -2084,6 +2084,115 @@ func TestBindOIDCOAuthLoginAppliesFirstBindGrantOnce(t *testing.T) {
 	require.Equal(t, 1, countProviderGrantRecords(t, client, existingUser.ID, "oidc", "first_bind"))
 }
 
+func TestApplyPendingOAuthAdoptionAndConsumeSessionInvalidatesAfterOuterCommit(t *testing.T) {
+	assigner := &oauthPendingFlowDefaultSubAssignerStub{
+		cachedBalances:      map[int64]float64{},
+		cachedSubscriptions: map[[2]int64]bool{},
+	}
+	handler, client := newOAuthPendingFlowTestHandlerWithDependencies(t, oauthPendingFlowTestHandlerOptions{
+		settingValues: map[string]string{
+			service.SettingKeyAuthSourceDefaultOIDCBalance:          "4.5",
+			service.SettingKeyAuthSourceDefaultOIDCSubscriptions:    `[{"group_id":101,"validity_days":30}]`,
+			service.SettingKeyAuthSourceDefaultOIDCGrantOnFirstBind: "true",
+		},
+		defaultSubAssigner: assigner,
+	})
+	ctx := context.Background()
+	user, err := client.User.Create().
+		SetEmail("outer-plan@example.com").
+		SetUsername("outer-plan").
+		SetPasswordHash("hash").
+		SetBalance(5).
+		SetConcurrency(1).
+		SetRole(service.RoleUser).
+		SetStatus(service.StatusActive).
+		Save(ctx)
+	require.NoError(t, err)
+	session, err := client.PendingAuthSession.Create().
+		SetSessionToken("outer-plan-session").
+		SetIntent("bind_current_user").
+		SetProviderType("oidc").
+		SetProviderKey("https://issuer.example").
+		SetProviderSubject("outer-plan-subject").
+		SetTargetUserID(user.ID).
+		SetResolvedEmail(user.Email).
+		SetBrowserSessionKey("outer-plan-browser").
+		SetUpstreamIdentityClaims(map[string]any{}).
+		SetExpiresAt(time.Now().UTC().Add(10 * time.Minute)).
+		Save(ctx)
+	require.NoError(t, err)
+	decision, err := client.IdentityAdoptionDecision.Create().
+		SetPendingAuthSessionID(session.ID).
+		SetAdoptDisplayName(false).
+		SetAdoptAvatar(false).
+		Save(ctx)
+	require.NoError(t, err)
+	assigner.client = client
+	assigner.sessionID = session.ID
+	assigner.cachedBalances[user.ID] = 5
+	assigner.cachedSubscriptions[[2]int64{user.ID, 101}] = true
+
+	err = applyPendingOAuthAdoptionAndConsumeSession(ctx, client, handler.authService, handler.userService, session, decision, user.ID)
+	require.NoError(t, err)
+	require.Len(t, assigner.calls, 1, "first-bind subscription grant must execute inside the outer transaction")
+	require.True(t, assigner.invalidationObserved, "cache invalidation plan must execute")
+	require.NoError(t, assigner.invalidationObserveErr)
+	require.True(t, assigner.invalidationObservedCommitted, "cache invalidation must observe the committed consumed session")
+	require.NotContains(t, assigner.cachedBalances, user.ID)
+	require.NotContains(t, assigner.cachedSubscriptions, [2]int64{user.ID, 101})
+	storedUser, err := client.User.Get(ctx, user.ID)
+	require.NoError(t, err)
+	require.Equal(t, 9.5, storedUser.Balance)
+}
+
+func TestApplyPendingOAuthAdoptionAndConsumeSessionRollbackKeepsCaches(t *testing.T) {
+	assigner := &oauthPendingFlowDefaultSubAssignerStub{
+		cachedBalances:      map[int64]float64{},
+		cachedSubscriptions: map[[2]int64]bool{},
+	}
+	handler, client := newOAuthPendingFlowTestHandlerWithDependencies(t, oauthPendingFlowTestHandlerOptions{
+		settingValues: map[string]string{
+			service.SettingKeyAuthSourceDefaultOIDCBalance:          "4.5",
+			service.SettingKeyAuthSourceDefaultOIDCSubscriptions:    `[{"group_id":101,"validity_days":30}]`,
+			service.SettingKeyAuthSourceDefaultOIDCGrantOnFirstBind: "true",
+		},
+		defaultSubAssigner: assigner,
+	})
+	ctx := context.Background()
+	user, err := client.User.Create().
+		SetEmail("outer-rollback@example.com").
+		SetUsername("outer-rollback").
+		SetPasswordHash("hash").
+		SetBalance(5).
+		SetConcurrency(1).
+		SetRole(service.RoleUser).
+		SetStatus(service.StatusActive).
+		Save(ctx)
+	require.NoError(t, err)
+	assigner.cachedBalances[user.ID] = 5
+	assigner.cachedSubscriptions[[2]int64{user.ID, 101}] = true
+	fakeSession := &dbent.PendingAuthSession{
+		ID:                     999999,
+		Intent:                 "bind_current_user",
+		ProviderType:           "oidc",
+		ProviderKey:            "https://issuer.example",
+		ProviderSubject:        "outer-rollback-subject",
+		TargetUserID:           &user.ID,
+		ResolvedEmail:          user.Email,
+		BrowserSessionKey:      "outer-rollback-browser",
+		UpstreamIdentityClaims: map[string]any{},
+	}
+	decision := &dbent.IdentityAdoptionDecision{ID: 999999, PendingAuthSessionID: fakeSession.ID}
+
+	err = applyPendingOAuthAdoptionAndConsumeSession(ctx, client, handler.authService, handler.userService, fakeSession, decision, user.ID)
+	require.Error(t, err)
+	require.Contains(t, assigner.cachedBalances, user.ID)
+	require.Contains(t, assigner.cachedSubscriptions, [2]int64{user.ID, 101})
+	storedUser, err := client.User.Get(ctx, user.ID)
+	require.NoError(t, err)
+	require.Equal(t, 5.0, storedUser.Balance)
+}
+
 func TestResolvePendingOAuthTargetUserIDNormalizesLegacySpacingAndCase(t *testing.T) {
 	handler, client := newOAuthPendingFlowTestHandler(t, false)
 	_ = handler
@@ -3317,7 +3426,14 @@ func oauthPendingFlowServiceUser(entity *dbent.User) *service.User {
 }
 
 type oauthPendingFlowDefaultSubAssignerStub struct {
-	calls []service.AssignSubscriptionInput
+	calls                         []service.AssignSubscriptionInput
+	cachedBalances                map[int64]float64
+	cachedSubscriptions           map[[2]int64]bool
+	client                        *dbent.Client
+	sessionID                     int64
+	invalidationObserved          bool
+	invalidationObserveErr        error
+	invalidationObservedCommitted bool
 }
 
 func (s *oauthPendingFlowDefaultSubAssignerStub) AssignOrExtendSubscription(
@@ -3328,6 +3444,37 @@ func (s *oauthPendingFlowDefaultSubAssignerStub) AssignOrExtendSubscription(
 		s.calls = append(s.calls, *input)
 	}
 	return nil, false, nil
+}
+
+func (s *oauthPendingFlowDefaultSubAssignerStub) AssignOrExtendSubscriptionDeferred(
+	ctx context.Context,
+	input *service.AssignSubscriptionInput,
+) (*service.UserSubscription, bool, error) {
+	return s.AssignOrExtendSubscription(ctx, input)
+}
+
+func (s *oauthPendingFlowDefaultSubAssignerStub) InvalidateProviderDefaultBalanceCache(_ context.Context, userID int64) error {
+	s.observeCommittedSession()
+	delete(s.cachedBalances, userID)
+	return nil
+}
+
+func (s *oauthPendingFlowDefaultSubAssignerStub) InvalidateProviderDefaultSubscriptionCache(_ context.Context, userID, groupID int64) error {
+	s.observeCommittedSession()
+	delete(s.cachedSubscriptions, [2]int64{userID, groupID})
+	return nil
+}
+
+func (s *oauthPendingFlowDefaultSubAssignerStub) observeCommittedSession() {
+	s.invalidationObserved = true
+	if s.client == nil || s.sessionID <= 0 {
+		return
+	}
+	session, err := s.client.PendingAuthSession.Get(context.Background(), s.sessionID)
+	s.invalidationObserveErr = err
+	if err == nil && session.ConsumedAt != nil {
+		s.invalidationObservedCommitted = true
+	}
 }
 
 type oauthPendingFlowTotpCacheStub struct {

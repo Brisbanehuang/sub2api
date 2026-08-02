@@ -161,7 +161,7 @@ func (s *AuthService) updateBoundEmailIdentityTx(
 	applyFirstBindDefaults bool,
 ) error {
 	if tx := dbent.TxFromContext(ctx); tx != nil {
-		return s.updateBoundEmailIdentityWithClient(ctx, tx.Client(), currentUser, email, hashedPassword, applyFirstBindDefaults)
+		return fmt.Errorf("email binding in an outer transaction requires a deferred invalidation plan")
 	}
 
 	tx, err := s.entClient.Tx(ctx)
@@ -171,11 +171,15 @@ func (s *AuthService) updateBoundEmailIdentityTx(
 	defer func() { _ = tx.Rollback() }()
 
 	txCtx := dbent.NewTxContext(ctx, tx)
-	if err := s.updateBoundEmailIdentityWithClient(txCtx, tx.Client(), currentUser, email, hashedPassword, applyFirstBindDefaults); err != nil {
+	plan, err := s.updateBoundEmailIdentityWithClient(txCtx, tx.Client(), currentUser, email, hashedPassword, applyFirstBindDefaults)
+	if err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return ErrServiceUnavailable
+	}
+	if applyFirstBindDefaults {
+		s.InvalidateProviderDefaultSettingsCaches(plan)
 	}
 	return nil
 }
@@ -187,9 +191,13 @@ func (s *AuthService) updateBoundEmailIdentityWithClient(
 	email string,
 	hashedPassword string,
 	applyFirstBindDefaults bool,
-) error {
+) (ProviderDefaultCacheInvalidationPlan, error) {
+	plan := ProviderDefaultCacheInvalidationPlan{}
+	if currentUser != nil {
+		plan.UserID = currentUser.ID
+	}
 	if client == nil || currentUser == nil || currentUser.ID <= 0 {
-		return ErrServiceUnavailable
+		return plan, ErrServiceUnavailable
 	}
 
 	oldEmail := currentUser.Email
@@ -198,34 +206,36 @@ func (s *AuthService) updateBoundEmailIdentityWithClient(
 		SetPasswordHash(hashedPassword).
 		Save(ctx); err != nil {
 		if dbent.IsConstraintError(err) {
-			return ErrEmailExists
+			return plan, ErrEmailExists
 		}
-		return ErrServiceUnavailable
+		return plan, ErrServiceUnavailable
 	}
 
 	if err := replaceBoundEmailAuthIdentityWithClient(ctx, client, currentUser.ID, oldEmail, email, "auth_service_email_bind"); err != nil {
 		if errors.Is(err, ErrEmailExists) {
-			return ErrEmailExists
+			return plan, ErrEmailExists
 		}
-		return ErrServiceUnavailable
+		return plan, ErrServiceUnavailable
 	}
 
 	if applyFirstBindDefaults {
-		if err := s.ApplyProviderDefaultSettingsOnFirstBind(ctx, currentUser.ID, "email"); err != nil {
-			return fmt.Errorf("apply email first bind defaults: %w", err)
+		var err error
+		plan, err = s.ApplyProviderDefaultSettingsOnFirstBindDeferred(ctx, currentUser.ID, "email")
+		if err != nil {
+			return plan, fmt.Errorf("apply email first bind defaults: %w", err)
 		}
 	}
 
 	updatedUser, err := client.User.Get(ctx, currentUser.ID)
 	if err != nil {
-		return ErrServiceUnavailable
+		return plan, ErrServiceUnavailable
 	}
 	currentUser.Email = updatedUser.Email
 	currentUser.PasswordHash = updatedUser.PasswordHash
 	currentUser.Balance = updatedUser.Balance
 	currentUser.Concurrency = updatedUser.Concurrency
 	currentUser.UpdatedAt = updatedUser.UpdatedAt
-	return nil
+	return plan, nil
 }
 
 func (s *AuthService) revokeEmailIdentitySessions(ctx context.Context, userID int64) {

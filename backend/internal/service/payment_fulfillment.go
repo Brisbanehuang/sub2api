@@ -516,11 +516,19 @@ func (s *PaymentService) ensurePaymentSubscriptionAssigned(ctx context.Context, 
 		return errors.New("subscription service is unavailable")
 	}
 
+	releaseUserLock, err := acquirePaymentUserLock(ctx, o.UserID)
+	if err != nil {
+		return err
+	}
+	defer releaseUserLock()
 	tx, err := s.entClient.Tx(ctx)
 	if err != nil {
 		return fmt.Errorf("begin subscription fulfillment tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := lockPaymentUserRow(ctx, tx, o.UserID); err != nil {
+		return err
+	}
 
 	txCtx := dbent.NewTxContext(ctx, tx)
 	txClient := tx.Client()
@@ -577,6 +585,7 @@ func (s *PaymentService) ensurePaymentSubscriptionAssigned(ctx context.Context, 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit subscription fulfillment tx: %w", err)
 	}
+	releaseUserLock()
 	// Assignment cache invalidation is deferred while this transaction is open,
 	// then performed synchronously against the committed subscription.
 	if err := s.subscriptionSvc.invalidateSubscriptionCaches(o.UserID, groupID); err != nil {
@@ -696,6 +705,9 @@ func (s *PaymentService) applyAffiliateRebateForOrder(ctx context.Context, o *db
 
 func affiliateRebateBaseAmount(o *dbent.PaymentOrder) float64 {
 	if o == nil {
+		return 0
+	}
+	if o.PaymentType == payment.TypeBalancePay {
 		return 0
 	}
 	switch o.OrderType {

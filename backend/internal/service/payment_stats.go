@@ -12,6 +12,7 @@ import (
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/paymentauditlog"
 	"github.com/Wei-Shaw/sub2api/ent/paymentorder"
+	"github.com/Wei-Shaw/sub2api/internal/payment"
 )
 
 // --- Dashboard & Analytics ---
@@ -35,6 +36,7 @@ func (s *PaymentService) GetDashboardStats(ctx context.Context, days int) (*Dash
 	if err != nil {
 		return nil, err
 	}
+	orders = externalRevenueOrders(orders)
 
 	st := &DashboardStats{}
 	computeBasicStats(st, orders, todayStart)
@@ -51,6 +53,17 @@ func (s *PaymentService) GetDashboardStats(ctx context.Context, days int) (*Dash
 	st.TopUsers = buildTopUsers(orders)
 
 	return st, nil
+}
+
+func externalRevenueOrders(orders []*dbent.PaymentOrder) []*dbent.PaymentOrder {
+	filtered := make([]*dbent.PaymentOrder, 0, len(orders))
+	for _, o := range orders {
+		if o == nil || o.PaymentType == payment.TypeBalancePay {
+			continue
+		}
+		filtered = append(filtered, o)
+	}
+	return filtered
 }
 
 func computeBasicStats(st *DashboardStats, orders []*dbent.PaymentOrder, todayStart time.Time) {

@@ -102,6 +102,39 @@ type balanceLoadUserRepoStub struct {
 	balance float64
 }
 
+type invalidationAwareBalanceLoadRepo struct {
+	UserRepository
+	mux          sync.Mutex
+	calls        atomic.Int64
+	firstStarted chan struct{}
+	firstRelease chan struct{}
+	firstBalance float64
+	nextBalance  float64
+}
+
+func (s *invalidationAwareBalanceLoadRepo) GetByID(ctx context.Context, id int64) (*User, error) {
+	call := s.calls.Add(1)
+	s.mux.Lock()
+	balance := s.nextBalance
+	if call == 1 {
+		balance = s.firstBalance
+	}
+	s.mux.Unlock()
+	if call == 1 {
+		close(s.firstStarted)
+		select {
+		case <-s.firstRelease:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return &User{ID: id, Balance: balance}, nil
+}
+
+func (s *invalidationAwareBalanceLoadRepo) GetBalance(context.Context, int64) (float64, error) {
+	return 0, errors.New("unexpected GetBalance call")
+}
+
 func (s *balanceLoadUserRepoStub) GetByID(ctx context.Context, id int64) (*User, error) {
 	s.calls.Add(1)
 	if s.delay > 0 {
@@ -161,7 +194,37 @@ func TestBillingCacheServiceGetUserBalance_Singleflight(t *testing.T) {
 	}
 
 	require.Equal(t, int64(1), userRepo.calls.Load(), "并发穿透应被 singleflight 合并")
-	require.Eventually(t, func() bool {
-		return cache.setBalanceCalls.Load() >= 1
-	}, time.Second, 10*time.Millisecond)
+	require.Zero(t, cache.setBalanceCalls.Load(), "legacy cache lacks a generation barrier and must not receive read-through fills")
+}
+
+func TestBillingCacheServiceInvalidateUserBalanceForgetsInFlightLoad(t *testing.T) {
+	cache := &billingCacheMissStub{}
+	repo := &invalidationAwareBalanceLoadRepo{
+		firstStarted: make(chan struct{}),
+		firstRelease: make(chan struct{}),
+		firstBalance: 10,
+		nextBalance:  20,
+	}
+	svc := NewBillingCacheService(cache, repo, nil, nil, nil, nil, &config.Config{}, nil)
+	t.Cleanup(svc.Stop)
+
+	firstResult := make(chan float64, 1)
+	firstErr := make(chan error, 1)
+	go func() {
+		balance, err := svc.GetUserBalance(context.Background(), 99)
+		firstResult <- balance
+		firstErr <- err
+	}()
+
+	requireReceive(t, repo.firstStarted)
+	require.NoError(t, svc.InvalidateUserBalance(context.Background(), 99))
+
+	secondBalance, err := svc.GetUserBalance(context.Background(), 99)
+	require.NoError(t, err)
+	require.Equal(t, 20.0, secondBalance)
+	require.Equal(t, int64(2), repo.calls.Load())
+
+	close(repo.firstRelease)
+	require.NoError(t, <-firstErr)
+	require.Equal(t, 10.0, <-firstResult)
 }

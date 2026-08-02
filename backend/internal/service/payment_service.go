@@ -3,11 +3,13 @@ package service
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -51,6 +53,8 @@ const (
 
 const paymentResumeSigningKeyEnv = "PAYMENT_RESUME_SIGNING_KEY"
 
+const balancePayOutTradeNoDomain = "sub2api:balance-pay:out-trade-no:v1"
+
 // --- Types ---
 
 // generateOutTradeNo creates a unique external order ID for payment providers.
@@ -70,21 +74,43 @@ func generateRandomString(n int) string {
 	return string(b)
 }
 
+func deriveBalancePayOutTradeNo(userID int64, idempotencyKey string) string {
+	seed := balancePayOutTradeNoDomain + "\x00" + strconv.FormatInt(userID, 10) + "\x00" + idempotencyKey
+	sum := sha256.Sum256([]byte(seed))
+	return hex.EncodeToString(sum[:])
+}
+
 type CreateOrderRequest struct {
-	UserID          int64
-	Amount          float64
-	PaymentType     string
-	OpenID          string
-	ClientIP        string
-	IsMobile        bool
-	IsWeChatBrowser bool
-	SrcHost         string
-	SrcURL          string
-	ReturnURL       string
-	PaymentSource   string
-	OrderType       string
-	PlanID          int64
-	Locale          string
+	UserID                     int64
+	IdempotencyKey             string
+	Amount                     float64
+	PaymentType                string
+	OpenID                     string
+	ClientIP                   string
+	IsMobile                   bool
+	IsWeChatBrowser            bool
+	SrcHost                    string
+	SrcURL                     string
+	ReturnURL                  string
+	PaymentSource              string
+	OrderType                  string
+	PlanID                     int64
+	Locale                     string
+	BalancePayCanonicalPayload *BalancePayCanonicalPayload
+}
+
+// BalancePayCanonicalPayload captures stable user-supplied business fields for
+// durable replay. Request environment and display fields are intentionally
+// excluded because they can change between otherwise identical retries.
+type BalancePayCanonicalPayload struct {
+	Amount        float64 `json:"amount"`
+	PaymentType   string  `json:"payment_type"`
+	OpenID        string  `json:"openid"`
+	ReturnURL     string  `json:"return_url"`
+	PaymentSource string  `json:"payment_source"`
+	OrderType     string  `json:"order_type"`
+	PlanID        int64   `json:"plan_id"`
+	IsMobile      *bool   `json:"is_mobile,omitempty"`
 }
 
 type CreateOrderResponse struct {

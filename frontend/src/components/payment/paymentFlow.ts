@@ -10,6 +10,7 @@ import type {
 export const PAYMENT_RECOVERY_STORAGE_KEY = 'payment.recovery.current'
 
 const VISIBLE_METHOD_ALIASES = {
+  balance_pay: 'balance_pay',
   alipay: 'alipay',
   alipay_direct: 'alipay',
   wxpay: 'wxpay',
@@ -19,7 +20,7 @@ const VISIBLE_METHOD_ALIASES = {
   airwallex: 'airwallex',
 } as const
 
-export type VisiblePaymentMethod = 'usdt' | 'alipay' | 'wxpay' | 'stripe' | 'airwallex'
+export type VisiblePaymentMethod = 'balance_pay' | 'usdt' | 'alipay' | 'wxpay' | 'stripe' | 'airwallex'
 export type StripeVisibleMethod = 'alipay' | 'wechat_pay'
 export type PaymentLaunchKind =
   | 'qr_waiting'

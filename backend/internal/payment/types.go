@@ -22,6 +22,7 @@ const (
 	TypeUSDT         PaymentType = "usdt"
 	TypeEasyPay      PaymentType = "easypay"
 	TypeAirwallex    PaymentType = "airwallex"
+	TypeBalancePay   PaymentType = "balance_pay"
 )
 
 // Order status constants shared across payment and service layers.
@@ -90,6 +91,8 @@ func GetBasePaymentType(t string) string {
 		return TypeEasyPay
 	case t == TypeAirwallex:
 		return TypeAirwallex
+	case t == TypeBalancePay:
+		return TypeBalancePay
 	case t == TypeStripe || t == TypeCard || t == TypeLink:
 		return TypeStripe
 	case t == TypeUSDT || strings.HasPrefix(t, TypeUSDT+"."):

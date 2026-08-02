@@ -149,7 +149,7 @@
                   </div>
                 </div>
               </div>
-              <div v-if="enabledMethods.length >= 1" class="card p-6">
+              <div v-if="subMethodOptions.length >= 1" class="card p-6">
                 <PaymentMethodSelector
                   :methods="subMethodOptions"
                   :selected="selectedMethod"
@@ -177,9 +177,9 @@
                   <span class="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent"></span>
                   {{ t('common.processing') }}
                 </span>
-                <span v-else>{{ t('payment.createOrder') }} {{ formatSelectedPaymentAmount(subTotalAmount) }}</span>
+                <span v-else>{{ t('payment.createOrder') }} {{ subscriptionSubmitAmountLabel }}</span>
               </button>
-              <button class="btn btn-secondary w-full" @click="selectedPlan = null">{{ t('common.cancel') }}</button>
+              <button class="btn btn-secondary w-full" @click="cancelSubscriptionConfirm">{{ t('common.cancel') }}</button>
             </template>
             <!-- Plan list -->
             <template v-else>
@@ -287,7 +287,7 @@ import { platformAccentBarClass, platformBadgeLightClass, platformBadgeClass, pl
 import SubscriptionPlanCard from '@/components/payment/SubscriptionPlanCard.vue'
 import PaymentStatusPanel from '@/components/payment/PaymentStatusPanel.vue'
 import Icon from '@/components/icons/Icon.vue'
-import { DEFAULT_PAYMENT_CURRENCY, formatPaymentAmount, normalizePaymentCurrency, paymentCurrencyFractionDigits } from '@/components/payment/currency'
+import { DEFAULT_PAYMENT_CURRENCY, formatPaymentAmount, normalizePaymentCurrency, paymentCurrencyFractionDigits, roundUpPaymentProduct } from '@/components/payment/currency'
 import { planValiditySuffix as validitySuffixOf } from '@/components/payment/validity'
 import type { PaymentMethodOption } from '@/components/payment/PaymentMethodSelector.vue'
 import { buildPaymentErrorToastMessage, describePaymentScenarioError } from './paymentUx'
@@ -514,6 +514,9 @@ const tabs = computed(() => {
 
 const visibleMethods = computed(() => getVisibleMethods(checkout.value.methods))
 const enabledMethods = computed(() => Object.keys(visibleMethods.value))
+const externalPaymentMethods = computed(() => enabledMethods.value.filter(type => type !== 'balance_pay'))
+const balancePayMethod = computed(() => visibleMethods.value.balance_pay)
+const hasAvailableBalancePayMethod = computed(() => balancePayMethod.value?.available === true)
 const validAmount = computed(() => amount.value ?? 0)
 const balanceRechargeMultiplier = computed(() => {
   const multiplier = checkout.value.balance_recharge_multiplier
@@ -525,6 +528,13 @@ const subscriptionUsdToCnyRate = computed(() => {
   return Number.isFinite(rate) && rate > 0 ? rate : 0
 })
 const creditedAmount = computed(() => Math.round((validAmount.value * balanceRechargeMultiplier.value) * 100) / 100)
+const userBalanceAmount = computed(() => Number(user.value?.balance || 0))
+const requiredBalance = computed(() => {
+  const price = selectedPlan.value?.price ?? 0
+  return roundUpPaymentProduct(price, balanceRechargeMultiplier.value)
+})
+const canUseBalancePay = computed(() => selectedPlan.value !== null && userBalanceAmount.value >= requiredBalance.value)
+const balancePayDeficit = computed(() => Math.max(0, Math.round((requiredBalance.value - userBalanceAmount.value) * 100) / 100))
 
 // Adaptive grid: center single card, 2-col for 2 plans, 3-col for 3+
 const planGridClass = computed(() => {
@@ -590,7 +600,7 @@ function subscriptionPaymentAmountForCurrency(value: number, currency: string): 
 }
 
 function paymentFeeRateForMethod(methodType: string): number {
-  if (!methodType || !visibleMethods.value[methodType]) return 0
+  if (!methodType || methodType === 'balance_pay' || !visibleMethods.value[methodType]) return 0
   const methodRate = Number(visibleMethods.value[methodType]?.fee_rate)
   if (Number.isFinite(methodRate) && methodRate > 0) return methodRate
   const fallbackRate = Number(checkout.value.recharge_fee_rate)
@@ -632,8 +642,17 @@ function formatSelectedSubscriptionPaymentAmount(value: number): string {
   return formatSelectedPaymentAmount(subscriptionPaymentAmountForCurrency(value, selectedCurrency.value))
 }
 
+function formatBalanceAmount(value: number): string {
+  return `$${value.toFixed(2)}`
+}
+
+function formatBalanceMetadataAmount(value: unknown): string {
+  const amount = Number(value)
+  return Number.isFinite(amount) ? formatBalanceAmount(amount) : ''
+}
+
 const methodOptions = computed<PaymentMethodOption[]>(() =>
-  enabledMethods.value.map((type) => {
+  externalPaymentMethods.value.map((type) => {
     const ml = visibleMethods.value[type]
     return {
       type,
@@ -655,7 +674,7 @@ const totalAmount = computed(() => rechargePayAmountForMethod(validAmount.value,
 const amountError = computed(() => {
   if (validAmount.value <= 0) return ''
   // No method can handle this amount
-  if (!enabledMethods.value.some((m) => rechargeAmountFitsMethod(validAmount.value, m))) {
+  if (!externalPaymentMethods.value.some((m) => rechargeAmountFitsMethod(validAmount.value, m))) {
     return t('payment.amountNoMethod')
   }
   // Selected method can't handle this amount (but others can)
@@ -670,6 +689,7 @@ const amountError = computed(() => {
 
 const canSubmit = computed(() =>
   validAmount.value > 0
+    && externalPaymentMethods.value.includes(selectedMethod.value)
     && rechargeAmountFitsMethod(validAmount.value, selectedMethod.value)
     && selectedLimit.value?.available !== false
 )
@@ -692,7 +712,7 @@ const subTotalAmount = computed(() => {
 // Subscription-specific: method options based on gateway pay amount
 const subMethodOptions = computed<PaymentMethodOption[]>(() => {
   const price = selectedPlan.value?.price ?? 0
-  return enabledMethods.value.map((type) => {
+  const externalOptions = externalPaymentMethods.value.map((type) => {
     const ml = visibleMethods.value[type]
     return {
       type,
@@ -701,18 +721,39 @@ const subMethodOptions = computed<PaymentMethodOption[]>(() => {
       available: ml?.available !== false && subscriptionAmountFitsMethod(price, type),
     }
   })
+  if (!hasAvailableBalancePayMethod.value) return externalOptions
+
+  const balanceOption: PaymentMethodOption = {
+    type: 'balance_pay',
+    fee_rate: 0,
+    available: canUseBalancePay.value,
+    hint: canUseBalancePay.value
+      ? t('payment.balancePay.currentBalance', { balance: formatBalanceAmount(userBalanceAmount.value) })
+      : t('payment.balancePay.insufficientShort', {
+        current: formatBalanceAmount(userBalanceAmount.value),
+        required: formatBalanceAmount(requiredBalance.value),
+        deficit: formatBalanceAmount(balancePayDeficit.value),
+      }),
+  }
+  return [balanceOption, ...externalOptions]
 })
 
-const canSubmitSubscription = computed(() =>
-  selectedPlan.value !== null
-    && subscriptionAmountFitsMethod(selectedPlan.value.price, selectedMethod.value)
+const subscriptionSubmitAmountLabel = computed(() => {
+  if (selectedMethod.value === 'balance_pay') return formatBalanceAmount(requiredBalance.value)
+  return formatSelectedPaymentAmount(subTotalAmount.value)
+})
+
+const canSubmitSubscription = computed(() => {
+  if (selectedPlan.value === null) return false
+  if (selectedMethod.value === 'balance_pay') return canUseBalancePay.value
+  return subscriptionAmountFitsMethod(selectedPlan.value.price, selectedMethod.value)
     && selectedLimit.value?.available !== false
-)
+})
 
 // Auto-switch to first available method when current selection can't handle the amount
 watch(() => [validAmount.value, selectedMethod.value] as const, ([amt, method]) => {
   if (amt <= 0 || rechargeAmountFitsMethod(amt, method)) return
-  const available = enabledMethods.value.find((m) => rechargeAmountFitsMethod(amt, m))
+  const available = externalPaymentMethods.value.find((m) => rechargeAmountFitsMethod(amt, m))
   if (available) selectedMethod.value = available
 })
 
@@ -755,6 +796,7 @@ function planPeakRateLabel(plan: SubscriptionPlan): string {
 
 function selectPlan(plan: SubscriptionPlan) {
   selectedPlan.value = plan
+  selectDefaultSubscriptionMethod(plan)
   errorMessage.value = ''
 }
 
@@ -762,7 +804,37 @@ function selectPlanFromModal(plan: SubscriptionPlan) {
   showRenewalModal.value = false
   renewGroupId.value = null
   selectedPlan.value = plan
+  selectDefaultSubscriptionMethod(plan)
   errorMessage.value = ''
+}
+
+function canUseBalanceForPlan(plan: SubscriptionPlan): boolean {
+  const required = roundUpPaymentProduct(plan.price, balanceRechargeMultiplier.value)
+  return userBalanceAmount.value >= required
+}
+
+function selectDefaultSubscriptionMethod(plan: SubscriptionPlan) {
+  if (hasAvailableBalancePayMethod.value && canUseBalanceForPlan(plan)) {
+    selectedMethod.value = 'balance_pay'
+    return
+  }
+  if (selectedMethod.value === 'balance_pay') {
+    selectedMethod.value = externalPaymentMethods.value.find((type) => subscriptionAmountFitsMethod(plan.price, type)) || ''
+  }
+}
+
+function firstExternalPaymentMethodForAmount(value: number): string {
+  return externalPaymentMethods.value.find((type) => rechargeAmountFitsMethod(value, type)) || externalPaymentMethods.value[0] || ''
+}
+
+function ensureExternalPaymentMethod() {
+  if (externalPaymentMethods.value.includes(selectedMethod.value)) return
+  selectedMethod.value = firstExternalPaymentMethodForAmount(validAmount.value)
+}
+
+function cancelSubscriptionConfirm() {
+  selectedPlan.value = null
+  ensureExternalPaymentMethod()
 }
 
 function closeRenewalModal() {
@@ -772,6 +844,7 @@ function closeRenewalModal() {
 
 async function handleSubmitRecharge() {
   if (!canSubmit.value || submitting.value) return
+  ensureExternalPaymentMethod()
   await createOrder(validAmount.value, 'balance')
 }
 
@@ -804,14 +877,28 @@ async function createOrder(orderAmount: number, orderType: OrderType, planId?: n
       payload.wechat_resume_token = options.wechatResumeToken
     }
 
-    const result = await paymentStore.createOrder(payload) as CreateOrderResult & { resume_token?: string }
+    const visibleMethod = normalizeVisibleMethod(requestType) || requestType
+    const result = (
+      visibleMethod === 'balance_pay'
+        ? await paymentStore.createOrder(payload, user.value?.id)
+        : await paymentStore.createOrder(payload)
+    ) as CreateOrderResult & { resume_token?: string }
+    if (visibleMethod === 'balance_pay' && result.status === 'COMPLETED') {
+      removeRecoverySnapshot()
+      selectedPlan.value = null
+      appStore.showSuccess(t('payment.balancePay.success'))
+      void Promise.allSettled([
+        Promise.resolve().then(() => authStore.refreshUser()),
+        Promise.resolve().then(() => subscriptionStore.fetchActiveSubscriptions(true)),
+      ])
+      return
+    }
     const openWindow = (url: string) => {
       const win = window.open(url, 'paymentPopup', getPaymentPopupFeatures())
       if (!win || win.closed) {
         window.location.href = url
       }
     }
-    const visibleMethod = normalizeVisibleMethod(requestType) || requestType
     // When user clicks the dedicated Stripe button, leave method blank so the
     // landing page renders Stripe's full Payment Element (card/link/alipay/wxpay).
     const stripeMethod = visibleMethod === 'stripe'
@@ -932,7 +1019,19 @@ async function createOrder(orderAmount: number, orderType: OrderType, planId?: n
     }
   } catch (err: unknown) {
     const apiErr = err as Record<string, unknown>
-    if (apiErr.reason === 'TOO_MANY_PENDING') {
+    if (apiErr.reason === 'INSUFFICIENT_BALANCE') {
+      const metadata = apiErr.metadata as Record<string, unknown> | undefined
+      await Promise.resolve().then(() => authStore.refreshUser()).catch(() => {})
+      const current = formatBalanceMetadataAmount(metadata?.current_balance) || formatBalanceAmount(userBalanceAmount.value)
+      const required = formatBalanceMetadataAmount(metadata?.required_balance) || formatBalanceAmount(requiredBalance.value)
+      const deficit = formatBalanceMetadataAmount(metadata?.deficit) || formatBalanceAmount(balancePayDeficit.value)
+      errorMessage.value = t('payment.balancePay.insufficient', {
+        current,
+        required,
+        deficit,
+      })
+      errorHintMessage.value = t('payment.balancePay.insufficientHint')
+    } else if (apiErr.reason === 'TOO_MANY_PENDING') {
       const metadata = apiErr.metadata as Record<string, unknown> | undefined
       errorMessage.value = t('payment.errors.tooManyPending', { max: metadata?.max || '' })
       errorHintMessage.value = ''
@@ -1116,9 +1215,9 @@ onMounted(async () => {
   try {
     const res = await paymentAPI.getCheckoutInfo()
     checkout.value = res.data
-    if (enabledMethods.value.length) {
+    if (externalPaymentMethods.value.length) {
       const order: readonly string[] = METHOD_ORDER
-      const sorted = [...enabledMethods.value].sort((a, b) => {
+      const sorted = [...externalPaymentMethods.value].sort((a, b) => {
         const ai = order.indexOf(a)
         const bi = order.indexOf(b)
         return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi)

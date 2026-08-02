@@ -7,7 +7,6 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/stretchr/testify/require"
@@ -21,6 +20,7 @@ type balanceEligibilityCacheStub struct {
 	invalidated              atomic.Bool
 	deductCalls              atomic.Int64
 	invalidateCalls          atomic.Int64
+	subscriptionInvalidates  atomic.Int64
 }
 
 func (s *balanceEligibilityCacheStub) GetUserBalance(context.Context, int64) (float64, error) {
@@ -38,6 +38,11 @@ func (s *balanceEligibilityCacheStub) DeductUserBalance(context.Context, int64, 
 func (s *balanceEligibilityCacheStub) InvalidateUserBalance(context.Context, int64) error {
 	s.invalidateCalls.Add(1)
 	s.invalidated.Store(true)
+	return nil
+}
+
+func (s *balanceEligibilityCacheStub) InvalidateSubscriptionCache(context.Context, int64, int64) error {
+	s.subscriptionInvalidates.Add(1)
 	return nil
 }
 
@@ -108,7 +113,7 @@ func TestSyncBalanceCacheAfterDeduction_InvalidatesWhenBalanceFallsBelowReserve(
 	require.Equal(t, int64(0), cache.deductCalls.Load())
 }
 
-func TestSyncBalanceCacheAfterDeduction_QueuesDeductWhenBalanceStillEligible(t *testing.T) {
+func TestSyncBalanceCacheAfterDeduction_InvalidatesWhenBalanceStillEligible(t *testing.T) {
 	cache := &balanceEligibilityCacheStub{balance: 1}
 	cfg := &config.Config{}
 	cfg.Billing.MinimumBalanceReserve = 0.01
@@ -121,8 +126,27 @@ func TestSyncBalanceCacheAfterDeduction_QueuesDeductWhenBalanceStillEligible(t *
 		User: &User{ID: 1},
 	}, &billingDeps{billingCacheService: svc}, &UsageBillingApplyResult{NewBalance: &newBalance})
 
-	require.Equal(t, int64(0), cache.invalidateCalls.Load())
-	require.Eventually(t, func() bool {
-		return cache.deductCalls.Load() == 1
-	}, 2*time.Second, 10*time.Millisecond)
+	require.Equal(t, int64(1), cache.invalidateCalls.Load())
+	require.Equal(t, int64(0), cache.deductCalls.Load())
+}
+
+func TestFinalizePostUsageBilling_InvalidatesSubscriptionCache(t *testing.T) {
+	cache := &balanceEligibilityCacheStub{}
+	svc := NewBillingCacheService(cache, nil, nil, nil, nil, nil, &config.Config{}, nil)
+	t.Cleanup(svc.Stop)
+	groupID := int64(7)
+
+	finalizePostUsageBilling(context.Background(), &postUsageBillingParams{
+		Cost:               &CostBreakdown{ActualCost: 0.25},
+		User:               &User{ID: 1},
+		APIKey:             &APIKey{GroupID: &groupID},
+		Account:            &Account{ID: 1},
+		IsSubscriptionBill: true,
+	}, &billingDeps{
+		billingCacheService: svc,
+		deferredService:     &DeferredService{},
+	}, &UsageBillingApplyResult{})
+
+	require.Equal(t, int64(1), cache.subscriptionInvalidates.Load())
+	require.Zero(t, atomic.LoadInt64(&cache.subscriptionUpdates))
 }

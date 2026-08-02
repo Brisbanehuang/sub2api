@@ -45,6 +45,15 @@ func TestUnionFloat(t *testing.T) {
 	}
 }
 
+func TestCalculateBalancePayRequiredBalanceUsesRechargeMultiplier(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, 35.90, calculateBalancePayRequiredBalance(35.90, 1))
+	require.Equal(t, 71.80, calculateBalancePayRequiredBalance(35.90, 2))
+	require.Equal(t, 17.95, calculateBalancePayRequiredBalance(35.90, 0.5))
+	require.Equal(t, 35.90, calculateBalancePayRequiredBalance(35.90, 0))
+}
+
 func makeInstance(id int64, providerKey, supportedTypes, limits string) *dbent.PaymentProviderInstance {
 	return &dbent.PaymentProviderInstance{
 		ID:             id,

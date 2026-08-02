@@ -82,6 +82,10 @@ describe('getVisibleMethods', () => {
       usdt_trc20: methodLimit({ fee_rate: 1 }),
     })
   })
+
+  it('normalizes balance_pay as a visible payment method', () => {
+    expect(normalizeVisibleMethod('balance_pay')).toBe('balance_pay')
+  })
 })
 
 describe('decidePaymentLaunch', () => {
@@ -339,6 +343,24 @@ describe('buildCreateOrderPayload', () => {
       return_url: 'https://app.example.com/payment/result',
       is_mobile: false,
       payment_source: 'wechat_in_app_resume',
+    })
+  })
+
+  it('builds balance_pay subscription orders for hosted checkout', () => {
+    expect(buildCreateOrderPayload({
+      amount: 35.9,
+      paymentType: 'balance_pay',
+      orderType: 'subscription',
+      planId: 7,
+      origin: 'https://api.brislouise.online',
+      isMobile: false,
+      isWechatBrowser: false,
+    })).toMatchObject({
+      amount: 35.9,
+      payment_type: 'balance_pay',
+      order_type: 'subscription',
+      plan_id: 7,
+      payment_source: 'hosted_redirect',
     })
   })
 

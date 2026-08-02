@@ -13,6 +13,7 @@ vi.mock('@/api/client', () => ({
 }))
 
 import { paymentAPI } from '@/api/payment'
+import type { CreateOrderRequest } from '@/types/payment'
 
 describe('payment api', () => {
   beforeEach(() => {
@@ -36,5 +37,34 @@ describe('payment api', () => {
     expect(post).toHaveBeenCalledWith('/payment/public/orders/resolve', {
       resume_token: 'resume-token-123',
     })
+  })
+
+  it('sends an idempotency key when creating an order', async () => {
+    const order: CreateOrderRequest = {
+      amount: 35.9,
+      payment_type: 'balance_pay',
+      order_type: 'subscription',
+      plan_id: 7,
+    }
+
+    await paymentAPI.createOrder(order, 'payment-order-key-123')
+
+    expect(post).toHaveBeenCalledWith('/payment/orders', order, {
+      headers: {
+        'Idempotency-Key': 'payment-order-key-123',
+      },
+    })
+  })
+
+  it('keeps the existing external create-order request shape even when a key is supplied', async () => {
+    const order: CreateOrderRequest = {
+      amount: 10,
+      payment_type: 'stripe',
+      order_type: 'balance',
+    }
+
+    await paymentAPI.createOrder(order, 'must-not-be-sent')
+
+    expect(post).toHaveBeenCalledWith('/payment/orders', order)
   })
 })

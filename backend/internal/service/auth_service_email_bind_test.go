@@ -25,7 +25,37 @@ import (
 )
 
 type emailBindDefaultSubAssignerStub struct {
-	calls []*service.AssignSubscriptionInput
+	calls                     []*service.AssignSubscriptionInput
+	deferredCalls             []*service.AssignSubscriptionInput
+	balanceInvalidations      []int64
+	subscriptionInvalidations [][2]int64
+	onDeferredAssign          func()
+	cachedBalances            map[int64]float64
+	cachedSubscriptions       map[[2]int64]bool
+}
+
+func (s *emailBindDefaultSubAssignerStub) AssignOrExtendSubscriptionDeferred(
+	_ context.Context,
+	input *service.AssignSubscriptionInput,
+) (*service.UserSubscription, bool, error) {
+	cloned := *input
+	s.deferredCalls = append(s.deferredCalls, &cloned)
+	if s.onDeferredAssign != nil {
+		s.onDeferredAssign()
+	}
+	return &service.UserSubscription{UserID: input.UserID, GroupID: input.GroupID}, false, nil
+}
+
+func (s *emailBindDefaultSubAssignerStub) InvalidateProviderDefaultBalanceCache(_ context.Context, userID int64) error {
+	s.balanceInvalidations = append(s.balanceInvalidations, userID)
+	delete(s.cachedBalances, userID)
+	return nil
+}
+
+func (s *emailBindDefaultSubAssignerStub) InvalidateProviderDefaultSubscriptionCache(_ context.Context, userID, groupID int64) error {
+	s.subscriptionInvalidations = append(s.subscriptionInvalidations, [2]int64{userID, groupID})
+	delete(s.cachedSubscriptions, [2]int64{userID, groupID})
+	return nil
 }
 
 func (s *emailBindDefaultSubAssignerStub) AssignOrExtendSubscription(
@@ -38,8 +68,10 @@ func (s *emailBindDefaultSubAssignerStub) AssignOrExtendSubscription(
 }
 
 type flakyEmailBindDefaultSubAssignerStub struct {
-	err   error
-	calls []*service.AssignSubscriptionInput
+	err                 error
+	calls               []*service.AssignSubscriptionInput
+	cachedBalances      map[int64]float64
+	cachedSubscriptions map[[2]int64]bool
 }
 
 func (s *flakyEmailBindDefaultSubAssignerStub) AssignOrExtendSubscription(
@@ -49,6 +81,23 @@ func (s *flakyEmailBindDefaultSubAssignerStub) AssignOrExtendSubscription(
 	cloned := *input
 	s.calls = append(s.calls, &cloned)
 	return nil, false, s.err
+}
+
+func (s *flakyEmailBindDefaultSubAssignerStub) AssignOrExtendSubscriptionDeferred(
+	ctx context.Context,
+	input *service.AssignSubscriptionInput,
+) (*service.UserSubscription, bool, error) {
+	return s.AssignOrExtendSubscription(ctx, input)
+}
+
+func (s *flakyEmailBindDefaultSubAssignerStub) InvalidateProviderDefaultBalanceCache(_ context.Context, userID int64) error {
+	delete(s.cachedBalances, userID)
+	return nil
+}
+
+func (s *flakyEmailBindDefaultSubAssignerStub) InvalidateProviderDefaultSubscriptionCache(_ context.Context, userID, groupID int64) error {
+	delete(s.cachedSubscriptions, [2]int64{userID, groupID})
+	return nil
 }
 
 func newAuthServiceForEmailBind(
@@ -165,11 +214,59 @@ func TestAuthServiceBindEmailIdentity_UpdatesEmailAndAppliesFirstBindDefaults(t 
 	require.NoError(t, err)
 	require.Equal(t, 1, identityCount)
 
-	require.Len(t, assigner.calls, 1)
-	require.Equal(t, user.ID, assigner.calls[0].UserID)
-	require.Equal(t, int64(11), assigner.calls[0].GroupID)
-	require.Equal(t, 30, assigner.calls[0].ValidityDays)
+	require.Empty(t, assigner.calls)
+	require.Len(t, assigner.deferredCalls, 1)
+	require.Equal(t, user.ID, assigner.deferredCalls[0].UserID)
+	require.Equal(t, int64(11), assigner.deferredCalls[0].GroupID)
+	require.Equal(t, 30, assigner.deferredCalls[0].ValidityDays)
+	require.Equal(t, []int64{user.ID}, assigner.balanceInvalidations)
+	require.Equal(t, [][2]int64{{user.ID, 11}}, assigner.subscriptionInvalidations)
 	require.Equal(t, 1, countProviderGrantRecords(t, client, user.ID, "email", "first_bind"))
+}
+
+func TestAuthServiceBindEmailIdentity_InvalidatesCommittedGrantPlanWithoutReloadingSettings(t *testing.T) {
+	settings := map[string]string{
+		service.SettingKeyAuthSourceDefaultEmailBalance:          "8.5",
+		service.SettingKeyAuthSourceDefaultEmailSubscriptions:    `[{"group_id":11,"validity_days":30}]`,
+		service.SettingKeyAuthSourceDefaultEmailGrantOnFirstBind: "true",
+	}
+	assigner := &emailBindDefaultSubAssignerStub{
+		cachedBalances:      map[int64]float64{},
+		cachedSubscriptions: map[[2]int64]bool{},
+	}
+	cache := &emailBindCacheStub{data: &service.VerificationCodeData{
+		Code:      "123456",
+		CreatedAt: time.Now().UTC(),
+		ExpiresAt: time.Now().UTC().Add(10 * time.Minute),
+	}}
+	svc, _, client := newAuthServiceForEmailBind(t, settings, cache, assigner)
+
+	ctx := context.Background()
+	user, err := client.User.Create().
+		SetEmail("plan-user" + service.LinuxDoConnectSyntheticEmailDomain).
+		SetUsername("plan-user").
+		SetPasswordHash("old-hash").
+		SetBalance(2.5).
+		SetConcurrency(1).
+		SetRole(service.RoleUser).
+		SetStatus(service.StatusActive).
+		Save(ctx)
+	require.NoError(t, err)
+	assigner.cachedBalances[user.ID] = 2.5
+	assigner.cachedSubscriptions[[2]int64{user.ID, 11}] = true
+	assigner.onDeferredAssign = func() {
+		settings[service.SettingKeyAuthSourceDefaultEmailBalance] = "0"
+		settings[service.SettingKeyAuthSourceDefaultEmailSubscriptions] = "[]"
+	}
+
+	_, err = svc.BindEmailIdentity(ctx, user.ID, "plan@example.com", "123456", "new-password")
+	require.NoError(t, err)
+
+	storedUser, err := client.User.Get(ctx, user.ID)
+	require.NoError(t, err)
+	require.Equal(t, 11.0, storedUser.Balance, "the transaction used the original resolved grant")
+	require.NotContains(t, assigner.cachedBalances, user.ID, "committed balance grant must invalidate the pre-commit cache")
+	require.NotContains(t, assigner.cachedSubscriptions, [2]int64{user.ID, 11}, "committed subscription grant must invalidate the pre-commit cache")
 }
 
 func TestAuthServiceBindEmailIdentity_RejectsExistingEmailOnAnotherUser(t *testing.T) {
@@ -215,7 +312,11 @@ func TestAuthServiceBindEmailIdentity_RejectsExistingEmailOnAnotherUser(t *testi
 }
 
 func TestAuthServiceBindEmailIdentity_RollsBackWhenFirstBindDefaultsFail(t *testing.T) {
-	assigner := &flakyEmailBindDefaultSubAssignerStub{err: errors.New("temporary assign failure")}
+	assigner := &flakyEmailBindDefaultSubAssignerStub{
+		err:                 errors.New("temporary assign failure"),
+		cachedBalances:      map[int64]float64{},
+		cachedSubscriptions: map[[2]int64]bool{},
+	}
 	cache := &emailBindCacheStub{
 		data: &service.VerificationCodeData{
 			Code:      "123456",
@@ -242,6 +343,8 @@ func TestAuthServiceBindEmailIdentity_RollsBackWhenFirstBindDefaultsFail(t *test
 		SetStatus(service.StatusActive).
 		Save(ctx)
 	require.NoError(t, err)
+	assigner.cachedBalances[user.ID] = 2.5
+	assigner.cachedSubscriptions[[2]int64{user.ID, 11}] = true
 
 	updatedUser, err := svc.BindEmailIdentity(ctx, user.ID, "rollback@example.com", "123456", "new-password")
 	require.ErrorContains(t, err, "apply email first bind defaults")
@@ -268,6 +371,8 @@ func TestAuthServiceBindEmailIdentity_RollsBackWhenFirstBindDefaultsFail(t *test
 
 	require.Len(t, assigner.calls, 1)
 	require.Equal(t, 0, countProviderGrantRecords(t, client, user.ID, "email", "first_bind"))
+	require.Contains(t, assigner.cachedBalances, user.ID, "rollback must not invalidate the existing balance cache")
+	require.Contains(t, assigner.cachedSubscriptions, [2]int64{user.ID, 11}, "rollback must not invalidate the existing subscription cache")
 }
 
 func TestAuthServiceBindEmailIdentity_RejectsReservedEmail(t *testing.T) {

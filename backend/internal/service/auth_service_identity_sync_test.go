@@ -35,6 +35,21 @@ func (s *authIdentityDefaultSubAssignerStub) AssignOrExtendSubscription(
 	return &service.UserSubscription{UserID: input.UserID, GroupID: input.GroupID}, true, nil
 }
 
+func (s *authIdentityDefaultSubAssignerStub) AssignOrExtendSubscriptionDeferred(
+	ctx context.Context,
+	input *service.AssignSubscriptionInput,
+) (*service.UserSubscription, bool, error) {
+	return s.AssignOrExtendSubscription(ctx, input)
+}
+
+func (s *authIdentityDefaultSubAssignerStub) InvalidateProviderDefaultBalanceCache(context.Context, int64) error {
+	return nil
+}
+
+func (s *authIdentityDefaultSubAssignerStub) InvalidateProviderDefaultSubscriptionCache(context.Context, int64, int64) error {
+	return nil
+}
+
 type flakyAuthIdentityDefaultSubAssignerStub struct {
 	failuresRemaining int
 	calls             []*service.AssignSubscriptionInput
@@ -51,6 +66,21 @@ func (s *flakyAuthIdentityDefaultSubAssignerStub) AssignOrExtendSubscription(
 		return nil, false, errors.New("temporary assign failure")
 	}
 	return &service.UserSubscription{UserID: input.UserID, GroupID: input.GroupID}, true, nil
+}
+
+func (s *flakyAuthIdentityDefaultSubAssignerStub) AssignOrExtendSubscriptionDeferred(
+	ctx context.Context,
+	input *service.AssignSubscriptionInput,
+) (*service.UserSubscription, bool, error) {
+	return s.AssignOrExtendSubscription(ctx, input)
+}
+
+func (s *flakyAuthIdentityDefaultSubAssignerStub) InvalidateProviderDefaultBalanceCache(context.Context, int64) error {
+	return nil
+}
+
+func (s *flakyAuthIdentityDefaultSubAssignerStub) InvalidateProviderDefaultSubscriptionCache(context.Context, int64, int64) error {
+	return nil
 }
 
 type authIdentitySettingRepoStub struct {

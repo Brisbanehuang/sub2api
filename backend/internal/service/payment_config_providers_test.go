@@ -182,6 +182,12 @@ func TestValidateEasyPayCustomMethods(t *testing.T) {
 			wantErr:        "customMethods type cannot start with alipay or wxpay, or equal usdt",
 		},
 		{
+			name:           "custom type cannot shadow first-class balance pay",
+			config:         map[string]string{"customMethods": `[{"type":"balance_pay","upstreamType":"epay"}]`},
+			supportedTypes: "alipay,wxpay,balance_pay",
+			wantErr:        "customMethods type cannot start with alipay or wxpay, or equal usdt or balance_pay",
+		},
+		{
 			name:           "supported custom type missing mapping",
 			config:         map[string]string{"customMethods": `[{"type":"ldc","upstreamType":"epay"}]`},
 			supportedTypes: "alipay,wxpay,ldc,usdt_trc20",

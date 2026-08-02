@@ -405,7 +405,7 @@ func (h *AuthHandler) completeEmailOAuthRegistration(c *gin.Context, provider st
 		response.ErrorFrom(c, err)
 		return
 	}
-	if err := applyPendingOAuthBinding(txCtx, client, h.authService, h.userService, &sessionForBinding, decision, &user.ID, true, false); err != nil {
+	if _, err := applyPendingOAuthBinding(txCtx, client, h.authService, h.userService, &sessionForBinding, decision, &user.ID, true, false); err != nil {
 		_ = tx.Rollback()
 		_ = h.authService.RollbackOAuthEmailAccountCreation(c.Request.Context(), user.ID, strings.TrimSpace(req.InvitationCode))
 		respondPendingOAuthBindingApplyError(c, err)

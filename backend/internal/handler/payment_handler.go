@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -141,7 +142,7 @@ func (h *PaymentHandler) GetCheckoutInfo(c *gin.Context) {
 	}
 
 	response.Success(c, checkoutInfoResponse{
-		Methods:                       limitsResp.Methods,
+		Methods:                       checkoutMethodsWithBalancePay(limitsResp.Methods),
 		GlobalMin:                     limitsResp.GlobalMin,
 		GlobalMax:                     limitsResp.GlobalMax,
 		Plans:                         planList,
@@ -158,7 +159,7 @@ func (h *PaymentHandler) GetCheckoutInfo(c *gin.Context) {
 }
 
 type checkoutInfoResponse struct {
-	Methods                       map[string]service.MethodLimits `json:"methods"`
+	Methods                       map[string]checkoutMethodLimits `json:"methods"`
 	GlobalMin                     float64                         `json:"global_min"`
 	GlobalMax                     float64                         `json:"global_max"`
 	Plans                         []checkoutPlan                  `json:"plans"`
@@ -171,6 +172,33 @@ type checkoutInfoResponse struct {
 	StripePublishableKey          string                          `json:"stripe_publishable_key"`
 	AlipayForceQRCode             bool                            `json:"alipay_force_qrcode"`
 	AlipayMobilePrecreateDeepLink bool                            `json:"alipay_mobile_precreate_deep_link"`
+}
+
+type checkoutMethodLimits struct {
+	service.MethodLimits
+	Available bool `json:"available"`
+}
+
+func checkoutMethodsWithBalancePay(methods map[string]service.MethodLimits) map[string]checkoutMethodLimits {
+	out := make(map[string]checkoutMethodLimits, len(methods)+1)
+	for method, limits := range methods {
+		out[method] = checkoutMethodLimits{
+			MethodLimits: limits,
+			Available:    true,
+		}
+	}
+	out[string(payment.TypeBalancePay)] = checkoutMethodLimits{
+		MethodLimits: service.MethodLimits{
+			PaymentType: string(payment.TypeBalancePay),
+			Currency:    payment.DefaultPaymentCurrency,
+			FeeRate:     0,
+			DailyLimit:  0,
+			SingleMin:   0,
+			SingleMax:   0,
+		},
+		Available: true,
+	}
+	return out
 }
 
 type checkoutPlan struct {
@@ -242,6 +270,13 @@ type CreateOrderRequest struct {
 	IsMobile *bool `json:"is_mobile,omitempty"`
 }
 
+const createPaymentOrderIdempotencyScope = "user.payment.orders.create"
+
+const (
+	balancePayExecutionTimeout    = 30 * time.Second
+	balancePayFinalizationTimeout = 5 * time.Second
+)
+
 // CreateOrder creates a new payment order.
 // POST /api/v1/payment/orders
 func (h *PaymentHandler) CreateOrder(c *gin.Context) {
@@ -271,27 +306,57 @@ func (h *PaymentHandler) CreateOrder(c *gin.Context) {
 	if req.IsMobile != nil {
 		mobile = *req.IsMobile
 	}
-	result, err := h.paymentService.CreateOrder(c.Request.Context(), service.CreateOrderRequest{
-		UserID:          subject.UserID,
-		Amount:          req.Amount,
-		PaymentType:     req.PaymentType,
-		OpenID:          req.OpenID,
-		ClientIP:        c.ClientIP(),
-		IsMobile:        mobile,
-		IsWeChatBrowser: isWeChatBrowser(c),
-		SrcHost:         c.Request.Host,
-		SrcURL:          c.Request.Referer(),
-		ReturnURL:       req.ReturnURL,
-		PaymentSource:   req.PaymentSource,
-		OrderType:       req.OrderType,
-		PlanID:          req.PlanID,
-		Locale:          c.GetHeader("Accept-Language"),
+	canonicalPayload := service.CanonicalizeBalancePayPayload(&service.BalancePayCanonicalPayload{
+		Amount:        req.Amount,
+		PaymentType:   req.PaymentType,
+		OpenID:        req.OpenID,
+		ReturnURL:     req.ReturnURL,
+		PaymentSource: req.PaymentSource,
+		OrderType:     req.OrderType,
+		PlanID:        req.PlanID,
+		IsMobile:      req.IsMobile,
 	})
+	serviceReq := service.CreateOrderRequest{
+		UserID:                     subject.UserID,
+		Amount:                     req.Amount,
+		PaymentType:                req.PaymentType,
+		OpenID:                     req.OpenID,
+		ClientIP:                   c.ClientIP(),
+		IsMobile:                   mobile,
+		IsWeChatBrowser:            isWeChatBrowser(c),
+		SrcHost:                    c.Request.Host,
+		SrcURL:                     c.Request.Referer(),
+		ReturnURL:                  req.ReturnURL,
+		PaymentSource:              req.PaymentSource,
+		OrderType:                  req.OrderType,
+		PlanID:                     req.PlanID,
+		Locale:                     c.GetHeader("Accept-Language"),
+		BalancePayCanonicalPayload: &canonicalPayload,
+	}
+	if service.NormalizeVisibleMethod(req.PaymentType) != payment.TypeBalancePay {
+		data, err := h.paymentService.CreateOrder(c.Request.Context(), serviceReq)
+		if err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
+		response.Success(c, data)
+		return
+	}
+	normalizedIdempotencyKey, err := service.NormalizeIdempotencyKey(c.GetHeader("Idempotency-Key"))
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
 	}
-	response.Success(c, result)
+	serviceReq.IdempotencyKey = normalizedIdempotencyKey
+
+	executeUserIdempotentJSONWithOptions(c, createPaymentOrderIdempotencyScope, canonicalPayload, service.DefaultWriteIdempotencyTTL(), userIdempotentJSONOptions{
+		NamespaceKeyByActor:      true,
+		EnforceKey:               true,
+		DetachedExecutionTimeout: balancePayExecutionTimeout,
+		FinalizationTimeout:      balancePayFinalizationTimeout,
+	}, func(ctx context.Context) (any, error) {
+		return h.paymentService.CreateOrder(ctx, serviceReq)
+	})
 }
 
 func applyWeChatPaymentResumeClaims(req *CreateOrderRequest, claims *service.WeChatPaymentResumeClaims) error {

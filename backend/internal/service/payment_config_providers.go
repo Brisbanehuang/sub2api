@@ -257,7 +257,7 @@ func validateEasyPayCustomMethods(config map[string]string, supportedTypes strin
 			return infraerrors.BadRequest("VALIDATION_ERROR", "customMethods upstreamType may only contain lowercase letters, digits, underscores, and hyphens")
 		}
 		if easyPayCustomMethodTypeConflictsWithBuiltin(method.Type) {
-			return infraerrors.BadRequest("VALIDATION_ERROR", "customMethods type cannot start with alipay or wxpay, or equal usdt")
+			return infraerrors.BadRequest("VALIDATION_ERROR", "customMethods type cannot start with alipay or wxpay, or equal usdt or balance_pay")
 		}
 		if _, exists := customTypes[method.Type]; exists {
 			return infraerrors.BadRequest("VALIDATION_ERROR", "duplicate customMethods type")
@@ -283,7 +283,8 @@ func validateEasyPayCustomMethods(config map[string]string, supportedTypes strin
 func easyPayCustomMethodTypeConflictsWithBuiltin(methodType string) bool {
 	return strings.HasPrefix(methodType, payment.TypeAlipay) ||
 		strings.HasPrefix(methodType, payment.TypeWxpay) ||
-		methodType == payment.TypeUSDT
+		methodType == payment.TypeUSDT ||
+		methodType == payment.TypeBalancePay
 }
 
 // UpdateProviderInstance updates a provider instance by ID (patch semantics).

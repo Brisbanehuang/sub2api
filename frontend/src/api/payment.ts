@@ -45,7 +45,14 @@ export const paymentAPI = {
   },
 
   /** Create a new payment order */
-  createOrder(data: CreateOrderRequest) {
+  createOrder(data: CreateOrderRequest, idempotencyKey?: string) {
+    if (data.payment_type === 'balance_pay' && idempotencyKey) {
+      return apiClient.post<CreateOrderResult>('/payment/orders', data, {
+        headers: {
+          'Idempotency-Key': idempotencyKey,
+        },
+      })
+    }
     return apiClient.post<CreateOrderResult>('/payment/orders', data)
   },
 

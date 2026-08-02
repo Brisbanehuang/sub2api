@@ -89,6 +89,8 @@ type cacheWriteTask struct {
 	balance          float64
 	amount           float64
 	subscriptionData *subscriptionCacheData
+	generation       int64
+	guardGeneration  bool
 }
 
 // apiKeyRateLimitLoader defines the interface for loading rate limit data from DB.
@@ -99,6 +101,13 @@ type apiKeyRateLimitLoader interface {
 type subscriptionCacheInvalidationPubSub interface {
 	PublishSubscriptionCacheInvalidation(ctx context.Context, cacheKey string) error
 	SubscribeSubscriptionCacheInvalidation(ctx context.Context, handler func(cacheKey string)) error
+}
+
+type billingCacheGenerationBarrier interface {
+	GetUserBalanceGeneration(ctx context.Context, userID int64) (int64, error)
+	SetUserBalanceIfGeneration(ctx context.Context, userID int64, balance float64, generation int64) (bool, error)
+	GetSubscriptionCacheGeneration(ctx context.Context, userID, groupID int64) (int64, error)
+	SetSubscriptionCacheIfGeneration(ctx context.Context, userID, groupID int64, data *SubscriptionCacheData, generation int64) (bool, error)
 }
 
 // BillingCacheService 计费缓存服务
@@ -219,9 +228,9 @@ func (s *BillingCacheService) cacheWriteWorker(ch <-chan cacheWriteTask) {
 		ctx, cancel := context.WithTimeout(context.Background(), cacheWriteTimeout)
 		switch task.kind {
 		case cacheWriteSetBalance:
-			s.setBalanceCache(ctx, task.userID, task.balance)
+			s.setBalanceCache(ctx, task.userID, task.balance, task.generation, task.guardGeneration)
 		case cacheWriteSetSubscription:
-			s.setSubscriptionCache(ctx, task.userID, task.groupID, task.subscriptionData)
+			s.setSubscriptionCache(ctx, task.userID, task.groupID, task.subscriptionData, task.generation, task.guardGeneration)
 		case cacheWriteUpdateSubscriptionUsage:
 			if s.cache != nil {
 				if err := s.cache.UpdateSubscriptionUsage(ctx, task.userID, task.groupID, task.amount); err != nil {
@@ -325,17 +334,34 @@ func (s *BillingCacheService) GetUserBalance(ctx context.Context, userID int64) 
 		loadCtx, cancel := context.WithTimeout(context.Background(), balanceLoadTimeout)
 		defer cancel()
 
+		generation, guardGeneration, cacheFillAllowed := int64(0), false, false
+		if generationCache, ok := s.cache.(billingCacheGenerationBarrier); ok {
+			capturedGeneration, generationErr := generationCache.GetUserBalanceGeneration(loadCtx, userID)
+			if generationErr != nil {
+				cacheFillAllowed = false
+				logger.LegacyPrintf("service.billing_cache", "Warning: get balance cache generation failed for user %d: %v", userID, generationErr)
+			} else {
+				generation = capturedGeneration
+				guardGeneration = true
+				cacheFillAllowed = true
+			}
+		}
+
 		balance, err := s.getUserBalanceFromDB(loadCtx, userID)
 		if err != nil {
 			return nil, err
 		}
 
-		// 异步建立缓存
-		_ = s.enqueueCacheWrite(cacheWriteTask{
-			kind:    cacheWriteSetBalance,
-			userID:  userID,
-			balance: balance,
-		})
+		if cacheFillAllowed {
+			// 异步建立缓存；generation 屏障阻止提交后的失效被旧回源结果覆盖。
+			_ = s.enqueueCacheWrite(cacheWriteTask{
+				kind:            cacheWriteSetBalance,
+				userID:          userID,
+				balance:         balance,
+				generation:      generation,
+				guardGeneration: guardGeneration,
+			})
+		}
 		return balance, nil
 	})
 	if err != nil {
@@ -358,8 +384,18 @@ func (s *BillingCacheService) getUserBalanceFromDB(ctx context.Context, userID i
 }
 
 // setBalanceCache 设置余额缓存
-func (s *BillingCacheService) setBalanceCache(ctx context.Context, userID int64, balance float64) {
+func (s *BillingCacheService) setBalanceCache(ctx context.Context, userID int64, balance float64, generation int64, guardGeneration bool) {
 	if s.cache == nil {
+		return
+	}
+	if guardGeneration {
+		generationCache, ok := s.cache.(billingCacheGenerationBarrier)
+		if !ok {
+			return
+		}
+		if _, err := generationCache.SetUserBalanceIfGeneration(ctx, userID, balance, generation); err != nil {
+			logger.LegacyPrintf("service.billing_cache", "Warning: set guarded balance cache failed for user %d: %v", userID, err)
+		}
 		return
 	}
 	if err := s.cache.SetUserBalance(ctx, userID, balance); err != nil {
@@ -400,6 +436,7 @@ func (s *BillingCacheService) InvalidateUserBalance(ctx context.Context, userID 
 	if s.cache == nil {
 		return nil
 	}
+	s.balanceLoadSF.Forget(strconv.FormatInt(userID, 10))
 	if err := s.cache.InvalidateUserBalance(ctx, userID); err != nil {
 		logger.LegacyPrintf("service.billing_cache", "Warning: invalidate balance cache failed for user %d: %v", userID, err)
 		return err
@@ -424,18 +461,34 @@ func (s *BillingCacheService) GetSubscriptionStatus(ctx context.Context, userID,
 	}
 
 	// 缓存未命中，从数据库读取
+	generation, guardGeneration, cacheFillAllowed := int64(0), false, false
+	if generationCache, ok := s.cache.(billingCacheGenerationBarrier); ok {
+		capturedGeneration, generationErr := generationCache.GetSubscriptionCacheGeneration(ctx, userID, groupID)
+		if generationErr != nil {
+			cacheFillAllowed = false
+			logger.LegacyPrintf("service.billing_cache", "Warning: get subscription cache generation failed for user %d group %d: %v", userID, groupID, generationErr)
+		} else {
+			generation = capturedGeneration
+			guardGeneration = true
+			cacheFillAllowed = true
+		}
+	}
 	data, err := s.getSubscriptionFromDB(ctx, userID, groupID)
 	if err != nil {
 		return nil, err
 	}
 
-	// 异步建立缓存
-	_ = s.enqueueCacheWrite(cacheWriteTask{
-		kind:             cacheWriteSetSubscription,
-		userID:           userID,
-		groupID:          groupID,
-		subscriptionData: data,
-	})
+	if cacheFillAllowed {
+		// 异步建立缓存；generation 屏障阻止提交后的失效被旧回源结果覆盖。
+		_ = s.enqueueCacheWrite(cacheWriteTask{
+			kind:             cacheWriteSetSubscription,
+			userID:           userID,
+			groupID:          groupID,
+			subscriptionData: data,
+			generation:       generation,
+			guardGeneration:  guardGeneration,
+		})
+	}
 
 	return data, nil
 }
@@ -480,8 +533,18 @@ func (s *BillingCacheService) getSubscriptionFromDB(ctx context.Context, userID,
 }
 
 // setSubscriptionCache 设置订阅缓存
-func (s *BillingCacheService) setSubscriptionCache(ctx context.Context, userID, groupID int64, data *subscriptionCacheData) {
+func (s *BillingCacheService) setSubscriptionCache(ctx context.Context, userID, groupID int64, data *subscriptionCacheData, generation int64, guardGeneration bool) {
 	if s.cache == nil || data == nil {
+		return
+	}
+	if guardGeneration {
+		generationCache, ok := s.cache.(billingCacheGenerationBarrier)
+		if !ok {
+			return
+		}
+		if _, err := generationCache.SetSubscriptionCacheIfGeneration(ctx, userID, groupID, s.convertToPortsData(data), generation); err != nil {
+			logger.LegacyPrintf("service.billing_cache", "Warning: set guarded subscription cache failed for user %d group %d: %v", userID, groupID, err)
+		}
 		return
 	}
 	if err := s.cache.SetSubscriptionCache(ctx, userID, groupID, s.convertToPortsData(data)); err != nil {

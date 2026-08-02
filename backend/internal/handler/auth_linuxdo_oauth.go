@@ -341,7 +341,7 @@ func (h *AuthHandler) LinuxDoOAuthCallback(c *gin.Context) {
 			"linuxdo",
 		)
 		if err == nil {
-			if err := applyPendingOAuthBinding(
+			if _, err := applyPendingOAuthBinding(
 				c.Request.Context(),
 				h.entClient(),
 				h.authService,

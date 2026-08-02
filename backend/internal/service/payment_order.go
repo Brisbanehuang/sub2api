@@ -29,6 +29,26 @@ func (s *PaymentService) CreateOrder(ctx context.Context, req CreateOrderRequest
 	if normalized := NormalizeVisibleMethod(req.PaymentType); normalized != "" {
 		req.PaymentType = normalized
 	}
+	if req.PaymentType == payment.TypeBalancePay {
+		idempotencyKey, err := NormalizeIdempotencyKey(req.IdempotencyKey)
+		if err != nil {
+			return nil, err
+		}
+		if idempotencyKey == "" {
+			return nil, ErrIdempotencyKeyRequired
+		}
+		req.IdempotencyKey = idempotencyKey
+		requestFingerprint, err := buildBalancePayRequestFingerprint(req)
+		if err != nil {
+			return nil, err
+		}
+		outTradeNo := deriveBalancePayOutTradeNo(req.UserID, idempotencyKey)
+		if response, found, err := findDurableBalancePayOrder(ctx, s.entClient.PaymentOrder.Query(), outTradeNo, req, requestFingerprint); err != nil {
+			return nil, err
+		} else if found {
+			return response, nil
+		}
+	}
 	cfg, err := s.configService.GetPaymentConfig(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("get payment config: %w", err)
@@ -60,6 +80,9 @@ func (s *PaymentService) CreateOrder(ctx context.Context, req CreateOrderRequest
 		limitAmount = plan.Price
 	} else if req.OrderType == payment.OrderTypeBalance {
 		orderAmount = calculateCreditedBalance(req.Amount, cfg.BalanceRechargeMultiplier)
+	}
+	if req.PaymentType == payment.TypeBalancePay {
+		return s.createBalancePaySubscriptionOrder(ctx, req, user, plan, cfg)
 	}
 	feeRate := createOrderFeeRate(req.PaymentType, cfg)
 	methodCurrency := payment.DefaultPaymentCurrency
@@ -150,11 +173,19 @@ func (s *PaymentService) validateSubOrder(ctx context.Context, req CreateOrderRe
 }
 
 func (s *PaymentService) createOrderInTx(ctx context.Context, req CreateOrderRequest, user *User, plan *dbent.SubscriptionPlan, cfg *PaymentConfig, orderAmount, limitAmount, feeRate, payAmount float64, sel *payment.InstanceSelection) (*dbent.PaymentOrder, error) {
+	releaseUserLock, err := acquirePaymentUserLock(ctx, req.UserID)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseUserLock()
 	tx, err := s.entClient.Tx(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := lockPaymentUserRow(ctx, tx, req.UserID); err != nil {
+		return nil, err
+	}
 	if err := s.checkPendingLimit(ctx, tx, req.UserID, cfg.MaxPendingOrders); err != nil {
 		return nil, err
 	}
@@ -221,6 +252,7 @@ func (s *PaymentService) createOrderInTx(ctx context.Context, req CreateOrderReq
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit order transaction: %w", err)
 	}
+	releaseUserLock()
 	return order, nil
 }
 

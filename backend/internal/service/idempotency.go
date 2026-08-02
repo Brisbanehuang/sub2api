@@ -79,14 +79,18 @@ func DefaultIdempotencyConfig() IdempotencyConfig {
 }
 
 type IdempotencyExecuteOptions struct {
-	Scope          string
-	ActorScope     string
-	Method         string
-	Route          string
-	IdempotencyKey string
-	Payload        any
-	TTL            time.Duration
-	RequireKey     bool
+	Scope                    string
+	ActorScope               string
+	KeyNamespace             string
+	Method                   string
+	Route                    string
+	IdempotencyKey           string
+	Payload                  any
+	TTL                      time.Duration
+	RequireKey               bool
+	DetachedExecutionTimeout time.Duration
+	FinalizationTimeout      time.Duration
+	NoRetryOnExecutorError   bool
 }
 
 type IdempotencyExecuteResult struct {
@@ -241,7 +245,11 @@ func (c *IdempotencyCoordinator) Execute(
 	now := time.Now()
 	expiresAt := now.Add(ttl)
 	lockedUntil := now.Add(c.cfg.ProcessingTimeout)
-	keyHash := HashIdempotencyKey(key)
+	keyMaterial := key
+	if opts.KeyNamespace != "" {
+		keyMaterial = opts.KeyNamespace + "\n" + key
+	}
+	keyHash := HashIdempotencyKey(keyMaterial)
 
 	record := &IdempotencyRecord{
 		Scope:              opts.Scope,
@@ -397,9 +405,19 @@ func (c *IdempotencyCoordinator) Execute(
 		recordIdempotencyProcessingDuration(opts.Route, opts.Scope, time.Since(execStart), nil)
 	}()
 
-	data, execErr := execute(ctx)
+	executionCtx := ctx
+	cancelExecution := func() {}
+	if opts.DetachedExecutionTimeout > 0 {
+		executionCtx, cancelExecution = context.WithTimeout(context.WithoutCancel(ctx), opts.DetachedExecutionTimeout)
+	}
+	defer cancelExecution()
+
+	data, execErr := execute(executionCtx)
 	if execErr != nil {
 		backoffUntil := time.Now().Add(c.cfg.FailedRetryBackoff)
+		if opts.NoRetryOnExecutorError {
+			backoffUntil = expiresAt
+		}
 		reason := infraerrors.Reason(execErr)
 		if reason == "" {
 			reason = "EXECUTION_FAILED"
@@ -408,7 +426,10 @@ func (c *IdempotencyCoordinator) Execute(
 		logIdempotencyAudit(opts.Route, opts.Scope, keyHash, "processing->failed_retryable", false, map[string]string{
 			"reason": reason,
 		})
-		if markErr := c.repo.MarkFailedRetryable(ctx, record.ID, reason, backoffUntil, expiresAt); markErr != nil {
+		finalizationCtx, cancelFinalization := detachedFinalizationContext(ctx, opts.FinalizationTimeout)
+		markErr := c.repo.MarkFailedRetryable(finalizationCtx, record.ID, reason, backoffUntil, expiresAt)
+		cancelFinalization()
+		if markErr != nil {
 			RecordIdempotencyStoreUnavailable(opts.Route, opts.Scope, "mark_failed_retryable_error")
 			logIdempotencyAudit(opts.Route, opts.Scope, keyHash, "processing->store_unavailable", false, map[string]string{
 				"operation": "mark_failed_retryable",
@@ -425,7 +446,10 @@ func (c *IdempotencyCoordinator) Execute(
 		})
 		return nil, ErrIdempotencyStoreUnavail.WithCause(marshalErr)
 	}
-	if markErr := c.repo.MarkSucceeded(ctx, record.ID, 200, storedBody, expiresAt); markErr != nil {
+	finalizationCtx, cancelFinalization := detachedFinalizationContext(ctx, opts.FinalizationTimeout)
+	markErr := c.repo.MarkSucceeded(finalizationCtx, record.ID, 200, storedBody, expiresAt)
+	cancelFinalization()
+	if markErr != nil {
 		RecordIdempotencyStoreUnavailable(opts.Route, opts.Scope, "mark_succeeded_error")
 		logIdempotencyAudit(opts.Route, opts.Scope, keyHash, "processing->store_unavailable", false, map[string]string{
 			"operation": "mark_succeeded",
@@ -435,6 +459,13 @@ func (c *IdempotencyCoordinator) Execute(
 	logIdempotencyAudit(opts.Route, opts.Scope, keyHash, "processing->succeeded", false, nil)
 
 	return &IdempotencyExecuteResult{Data: data}, nil
+}
+
+func detachedFinalizationContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return parent, func() {}
+	}
+	return context.WithTimeout(context.WithoutCancel(parent), timeout)
 }
 
 func (c *IdempotencyCoordinator) conflictWithRetryAfter(base *infraerrors.ApplicationError, lockedUntil *time.Time, now time.Time) error {

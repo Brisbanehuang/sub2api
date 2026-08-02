@@ -331,7 +331,9 @@ func finalizePostUsageBilling(ctx context.Context, p *postUsageBillingParams, de
 
 	if p.IsSubscriptionBill {
 		if p.Cost.ActualCost > 0 && p.User != nil && p.APIKey != nil && p.APIKey.GroupID != nil {
-			deps.billingCacheService.QueueUpdateSubscriptionUsage(p.User.ID, *p.APIKey.GroupID, p.Cost.ActualCost)
+			if err := deps.billingCacheService.InvalidateSubscription(ctx, p.User.ID, *p.APIKey.GroupID); err != nil {
+				slog.Warn("invalidate subscription cache after committed usage failed", "user_id", p.User.ID, "group_id", *p.APIKey.GroupID, "error", err)
+			}
 		}
 	} else if p.Cost.ActualCost > 0 && p.User != nil {
 		syncBalanceCacheAfterDeduction(ctx, p, deps, result)
@@ -398,7 +400,9 @@ func syncBalanceCacheAfterDeduction(ctx context.Context, p *postUsageBillingPara
 		}
 		return
 	}
-	deps.billingCacheService.QueueDeductBalance(p.User.ID, p.Cost.ActualCost)
+	if err := deps.billingCacheService.InvalidateUserBalance(ctx, p.User.ID); err != nil {
+		slog.Warn("invalidate balance cache after committed deduction failed", "user_id", p.User.ID, "error", err)
+	}
 }
 
 // notifyBalanceLow sends balance low notification after deduction.

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/internal/payment"
 	"github.com/stretchr/testify/require"
 )
 
@@ -81,4 +82,52 @@ func paymentStatsTestOrder(userID int64, email, currency string, amount float64,
 		PaidAt:           paidAt,
 		ProviderSnapshot: map[string]any{"currency": currency},
 	}
+}
+
+func TestComputeBasicStatsExcludesBalancePay(t *testing.T) {
+	now := time.Now()
+	orders := []*dbent.PaymentOrder{
+		{
+			PayAmount:   50,
+			PaidAt:      &now,
+			PaymentType: payment.TypeUSDT,
+		},
+		{
+			PayAmount:   35.90,
+			PaidAt:      &now,
+			PaymentType: payment.TypeBalancePay,
+		},
+	}
+
+	st := &DashboardStats{}
+	computeBasicStats(st, externalRevenueOrders(orders), now.Add(-time.Hour))
+
+	require.Equal(t, CurrencyAmounts{payment.DefaultPaymentCurrency: 50}, st.TotalAmount)
+	require.Equal(t, CurrencyAmounts{payment.DefaultPaymentCurrency: 50}, st.TodayAmount)
+	if st.TotalCount != 1 {
+		t.Fatalf("TotalCount = %v, want 1", st.TotalCount)
+	}
+}
+
+func TestBuildMethodDistributionExcludesBalancePay(t *testing.T) {
+	orders := []*dbent.PaymentOrder{
+		{
+			PayAmount:   50,
+			PaymentType: payment.TypeUSDT,
+		},
+		{
+			PayAmount:   35.90,
+			PaymentType: payment.TypeBalancePay,
+		},
+	}
+
+	methods := buildMethodDistribution(externalRevenueOrders(orders))
+
+	if len(methods) != 1 {
+		t.Fatalf("len(methods) = %v, want 1: %#v", len(methods), methods)
+	}
+	if methods[0].Type != payment.TypeUSDT {
+		t.Fatalf("methods[0].Type = %q, want %q", methods[0].Type, payment.TypeUSDT)
+	}
+	require.Equal(t, CurrencyAmounts{payment.DefaultPaymentCurrency: 50}, methods[0].Amount)
 }

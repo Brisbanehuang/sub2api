@@ -217,6 +217,31 @@ func (s *SubscriptionService) AssignOrExtendSubscription(ctx context.Context, in
 	return s.assignOrExtendSubscription(ctx, input, false)
 }
 
+func (s *SubscriptionService) AssignOrExtendSubscriptionDeferred(ctx context.Context, input *AssignSubscriptionInput) (*UserSubscription, bool, error) {
+	return s.assignOrExtendSubscription(ctx, input, true)
+}
+
+func (s *SubscriptionService) InvalidateProviderDefaultBalanceCache(ctx context.Context, userID int64) error {
+	if s == nil || s.billingCacheService == nil {
+		return nil
+	}
+	return s.billingCacheService.InvalidateUserBalance(ctx, userID)
+}
+
+func (s *SubscriptionService) InvalidateProviderDefaultSubscriptionCache(ctx context.Context, userID, groupID int64) error {
+	if s == nil {
+		return nil
+	}
+	s.InvalidateSubCacheSync(userID, groupID)
+	if s.billingCacheService == nil {
+		return nil
+	}
+	if err := s.billingCacheService.InvalidateSubscription(ctx, userID, groupID); err != nil {
+		return err
+	}
+	return s.billingCacheService.PublishSubscriptionCacheInvalidation(ctx, subCacheKey(userID, groupID))
+}
+
 func (s *SubscriptionService) assignOrExtendSubscription(ctx context.Context, input *AssignSubscriptionInput, deferCacheInvalidation bool) (*UserSubscription, bool, error) {
 	// 检查分组是否存在且为订阅类型
 	group, err := s.groupRepo.GetByID(ctx, input.GroupID)

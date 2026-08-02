@@ -16,10 +16,16 @@ const routerPush = vi.hoisted(() => vi.fn())
 const routerResolve = vi.hoisted(() => vi.fn(() => ({ href: '/payment/stripe?mock=1' })))
 const createOrder = vi.hoisted(() => vi.fn())
 const refreshUser = vi.hoisted(() => vi.fn())
+const authUserState = vi.hoisted(() => ({
+  id: 101,
+  username: 'demo-user',
+  balance: 0,
+}))
 const fetchActiveSubscriptions = vi.hoisted(() => vi.fn().mockResolvedValue(undefined))
 const showError = vi.hoisted(() => vi.fn())
 const showInfo = vi.hoisted(() => vi.fn())
 const showWarning = vi.hoisted(() => vi.fn())
+const showSuccess = vi.hoisted(() => vi.fn())
 const getCheckoutInfo = vi.hoisted(() => vi.fn())
 const bridgeInvoke = vi.hoisted(() => vi.fn())
 
@@ -48,10 +54,7 @@ vi.mock('vue-i18n', async () => {
 
 vi.mock('@/stores/auth', () => ({
   useAuthStore: () => ({
-    user: {
-      username: 'demo-user',
-      balance: 0,
-    },
+    user: authUserState,
     refreshUser,
   }),
 }))
@@ -74,6 +77,17 @@ vi.mock('@/stores', () => ({
     showError,
     showInfo,
     showWarning,
+    showSuccess,
+  }),
+}))
+
+vi.mock('@/stores/app', () => ({
+  useAppStore: () => ({
+    cachedPublicSettings: {},
+    showError,
+    showInfo,
+    showWarning,
+    showSuccess,
   }),
 }))
 
@@ -166,6 +180,15 @@ function checkoutInfoWithStripeFeeFixture() {
     data: {
       ...checkoutInfoFixture().data,
       methods: {
+        balance_pay: {
+          daily_limit: 0,
+          daily_used: 0,
+          daily_remaining: 0,
+          single_min: 0,
+          single_max: 0,
+          fee_rate: 0,
+          available: true,
+        },
         usdt: {
           daily_limit: 0,
           daily_used: 0,
@@ -185,6 +208,65 @@ function checkoutInfoWithStripeFeeFixture() {
           available: true,
         },
       },
+    },
+  }
+}
+
+function checkoutInfoWithBalancePayPlansFixture() {
+  return {
+    data: {
+      ...checkoutInfoFixture().data,
+      methods: {
+        balance_pay: {
+          daily_limit: 0,
+          daily_used: 0,
+          daily_remaining: 0,
+          single_min: 0,
+          single_max: 0,
+          fee_rate: 0,
+          available: true,
+        },
+        usdt: {
+          daily_limit: 0,
+          daily_used: 0,
+          daily_remaining: 0,
+          single_min: 0,
+          single_max: 0,
+          fee_rate: 0,
+          available: true,
+        },
+        stripe: {
+          daily_limit: 0,
+          daily_used: 0,
+          daily_remaining: 0,
+          single_min: 0,
+          single_max: 0,
+          fee_rate: 3,
+          available: true,
+        },
+      },
+      plans: [
+        {
+          id: 35,
+          group_id: 3,
+          name: 'Starter',
+          description: '',
+          price: 35.9,
+          original_price: 0,
+          validity_days: 30,
+          validity_unit: 'day',
+          rate_multiplier: 1,
+          daily_limit_usd: null,
+          weekly_limit_usd: null,
+          monthly_limit_usd: null,
+          features: [],
+          group_platform: 'openai',
+          sort_order: 1,
+          for_sale: true,
+          group_name: 'OpenAI',
+        },
+      ],
+      balance_recharge_multiplier: 1,
     },
   }
 }
@@ -531,6 +613,8 @@ describe('PaymentView payment recovery', () => {
 
 describe('PaymentView WeChat JSAPI flow', () => {
   beforeEach(() => {
+    authUserState.username = 'demo-user'
+    authUserState.balance = 0
     routeState.path = '/purchase'
     routeState.query = {
       wechat_resume: '1',
@@ -545,6 +629,7 @@ describe('PaymentView WeChat JSAPI flow', () => {
     showError.mockReset()
     showInfo.mockReset()
     showWarning.mockReset()
+    showSuccess.mockReset()
     getCheckoutInfo.mockReset().mockResolvedValue(checkoutInfoFixture())
     bridgeInvoke.mockReset()
     window.localStorage.clear()
@@ -768,6 +853,8 @@ describe('PaymentView WeChat JSAPI flow', () => {
 
 describe('PaymentView Stripe fee preview', () => {
   beforeEach(() => {
+    authUserState.username = 'demo-user'
+    authUserState.balance = 0
     routeState.path = '/purchase'
     routeState.query = {}
     routerReplace.mockReset().mockResolvedValue(undefined)
@@ -779,6 +866,7 @@ describe('PaymentView Stripe fee preview', () => {
     showError.mockReset()
     showInfo.mockReset()
     showWarning.mockReset()
+    showSuccess.mockReset()
     getCheckoutInfo.mockReset().mockResolvedValue(checkoutInfoWithStripeFeeFixture())
     bridgeInvoke.mockReset()
     window.localStorage.clear()
@@ -911,5 +999,260 @@ describe('PaymentView Stripe fee preview', () => {
     expect(submitButton?.attributes('disabled')).toBeDefined()
     await submitButton!.trigger('click')
     expect(createOrder).not.toHaveBeenCalled()
+  })
+})
+
+describe('PaymentView balance pay subscription flow', () => {
+  beforeEach(() => {
+    authUserState.username = 'demo-user'
+    authUserState.balance = 0
+    routeState.path = '/purchase'
+    routeState.query = {}
+    routerReplace.mockReset().mockResolvedValue(undefined)
+    routerPush.mockReset().mockResolvedValue(undefined)
+    routerResolve.mockClear()
+    createOrder.mockReset()
+    refreshUser.mockReset().mockResolvedValue(undefined)
+    fetchActiveSubscriptions.mockReset().mockResolvedValue(undefined)
+    showError.mockReset()
+    showInfo.mockReset()
+    showWarning.mockReset()
+    showSuccess.mockReset()
+    getCheckoutInfo.mockReset().mockResolvedValue(checkoutInfoWithBalancePayPlansFixture())
+    bridgeInvoke.mockReset()
+    window.localStorage.clear()
+  })
+
+  async function mountAndSelectSubscriptionPlan() {
+    const wrapper = mount(PaymentView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          Teleport: true,
+          Transition: false,
+        },
+      },
+    })
+    await flushPromises()
+    await flushPromises()
+
+    ;(wrapper.vm as unknown as { activeTab: 'subscription' }).activeTab = 'subscription'
+    await wrapper.vm.$nextTick()
+    const subscribeButton = wrapper.findAll('button').find((button) => button.text().includes('payment.subscribeNow'))
+    expect(subscribeButton).toBeTruthy()
+    await subscribeButton!.trigger('click')
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+    return wrapper
+  }
+
+  it('shows selectable balance pay when balance is enough and submits a subscription order', async () => {
+    authUserState.balance = 100
+    createOrder.mockResolvedValue({
+      order_id: 881,
+      amount: 35.9,
+      pay_amount: 35.9,
+      fee_rate: 0,
+      expires_at: '2099-01-01T00:10:00.000Z',
+      payment_type: 'balance_pay',
+      status: 'COMPLETED',
+    })
+
+    const wrapper = await mountAndSelectSubscriptionPlan()
+
+    expect(wrapper.text()).toContain('payment.methods.balance_pay')
+    expect(wrapper.findAll('button').filter((button) => button.text().includes('payment.methods.balance_pay'))).toHaveLength(1)
+    const balanceButton = wrapper.findAll('button').find((button) => button.text().includes('payment.methods.balance_pay'))
+    expect(balanceButton?.attributes('disabled')).toBeUndefined()
+
+    await balanceButton!.trigger('click')
+    const submitButton = wrapper.findAll('button').find((button) => button.text().includes('payment.createOrder'))
+    expect(submitButton?.attributes('disabled')).toBeUndefined()
+    await submitButton!.trigger('click')
+    await flushPromises()
+
+    expect(createOrder).toHaveBeenCalledWith(expect.objectContaining({
+      payment_type: 'balance_pay',
+      order_type: 'subscription',
+      plan_id: 35,
+    }), 101)
+  })
+
+  it.each([
+    ['user refresh', () => refreshUser.mockRejectedValueOnce(new Error('user refresh failed'))],
+    ['subscription refresh', () => fetchActiveSubscriptions.mockRejectedValueOnce(new Error('subscription refresh failed'))],
+  ])('keeps a completed balance pay purchase successful when %s fails', async (_label, failRefresh) => {
+    authUserState.balance = 100
+    createOrder.mockResolvedValue({
+      order_id: 881,
+      amount: 35.9,
+      pay_amount: 35.9,
+      fee_rate: 0,
+      expires_at: '2099-01-01T00:10:00.000Z',
+      payment_type: 'balance_pay',
+      status: 'COMPLETED',
+    })
+
+    const wrapper = await mountAndSelectSubscriptionPlan()
+    failRefresh()
+
+    const balanceButton = wrapper.findAll('button').find(button => button.text().includes('payment.methods.balance_pay'))
+    await balanceButton!.trigger('click')
+    const submitButton = wrapper.findAll('button').find(button => button.text().includes('payment.createOrder'))
+    await submitButton!.trigger('click')
+    await flushPromises()
+
+    expect(refreshUser).toHaveBeenCalled()
+    expect(fetchActiveSubscriptions).toHaveBeenCalledWith(true)
+    expect((wrapper.vm as unknown as { selectedPlan: SubscriptionPlan | null }).selectedPlan).toBeNull()
+    expect(showSuccess).toHaveBeenCalledWith('payment.balancePay.success')
+    expect(showError).not.toHaveBeenCalled()
+  })
+
+  it('does not show balance pay on subscription confirm when checkout methods omit it', async () => {
+    authUserState.balance = 100
+    getCheckoutInfo.mockResolvedValue(checkoutInfoWithPlansFixture())
+
+    const wrapper = await mountAndSelectSubscriptionPlan()
+
+    expect(wrapper.text()).not.toContain('payment.methods.balance_pay')
+    expect((wrapper.vm as unknown as { selectedMethod: string }).selectedMethod).not.toBe('balance_pay')
+  })
+
+  it('does not show backend balance_pay methods on the recharge tab', async () => {
+    authUserState.balance = 100
+
+    const wrapper = mount(PaymentView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          Teleport: true,
+          Transition: false,
+        },
+      },
+    })
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('payment.methods.balance_pay')
+    expect(wrapper.text()).toContain('payment.methods.usdt')
+  })
+
+  it('resets to an external payment method after cancelling balance pay subscription confirmation', async () => {
+    authUserState.balance = 100
+
+    const wrapper = await mountAndSelectSubscriptionPlan()
+
+    expect((wrapper.vm as unknown as { selectedMethod: string }).selectedMethod).toBe('balance_pay')
+    const cancelButton = wrapper.findAll('button').find((button) => button.text().includes('common.cancel'))
+    await cancelButton!.trigger('click')
+    await wrapper.vm.$nextTick()
+    ;(wrapper.vm as unknown as { activeTab: 'recharge'; amount: number | null }).activeTab = 'recharge'
+    ;(wrapper.vm as unknown as { activeTab: 'recharge'; amount: number | null }).amount = 50
+    await wrapper.vm.$nextTick()
+
+    expect((wrapper.vm as unknown as { selectedMethod: string }).selectedMethod).not.toBe('balance_pay')
+
+    createOrder.mockResolvedValue({
+      order_id: 882,
+      amount: 50,
+      pay_amount: 50,
+      fee_rate: 0,
+      expires_at: '2099-01-01T00:10:00.000Z',
+      payment_type: 'usdt',
+    })
+    const submitButton = wrapper.findAll('button').find((button) => button.text().includes('payment.createOrder'))
+    expect(submitButton?.attributes('disabled')).toBeUndefined()
+    await submitButton!.trigger('click')
+    await flushPromises()
+
+    expect(createOrder).toHaveBeenCalledWith(expect.objectContaining({
+      order_type: 'balance',
+      payment_type: 'usdt',
+    }))
+  })
+
+  it('shows the required balance on the balance pay submit button when multiplier is not one', async () => {
+    authUserState.balance = 100
+    getCheckoutInfo.mockResolvedValue({
+      data: {
+        ...checkoutInfoWithBalancePayPlansFixture().data,
+        balance_recharge_multiplier: 2,
+      },
+    })
+
+    const wrapper = await mountAndSelectSubscriptionPlan()
+
+    const submitButton = wrapper.findAll('button').find((button) => button.text().includes('payment.createOrder'))
+    expect(submitButton?.text()).toContain('$71.80')
+  })
+
+  it('rounds the required balance up to cents like the backend', async () => {
+    authUserState.balance = 0.01
+    const checkout = checkoutInfoWithBalancePayPlansFixture()
+    checkout.data.plans[0].price = 0.49
+    checkout.data.balance_recharge_multiplier = 0.01
+    getCheckoutInfo.mockResolvedValue(checkout)
+
+    const wrapper = await mountAndSelectSubscriptionPlan()
+
+    const submitButton = wrapper.findAll('button').find((button) => button.text().includes('payment.createOrder'))
+    expect(submitButton?.text()).toContain('$0.01')
+    expect(submitButton?.attributes('disabled')).toBeUndefined()
+  })
+
+  it('does not auto-select balance pay when RoundUp makes the balance insufficient', async () => {
+    authUserState.balance = 0.005
+    const checkout = checkoutInfoWithBalancePayPlansFixture()
+    checkout.data.plans[0].price = 0.49
+    checkout.data.balance_recharge_multiplier = 0.01
+    getCheckoutInfo.mockResolvedValue(checkout)
+
+    const wrapper = await mountAndSelectSubscriptionPlan()
+
+    expect((wrapper.vm as unknown as { selectedMethod: string }).selectedMethod).not.toBe('balance_pay')
+    const submitButton = wrapper.findAll('button').find((button) => button.text().includes('payment.createOrder'))
+    expect(submitButton?.attributes('disabled')).toBeUndefined()
+  })
+
+  it('disables balance pay and shows 余额 insufficient hint when balance is too low', async () => {
+    authUserState.balance = 10
+
+    const wrapper = await mountAndSelectSubscriptionPlan()
+
+    expect(wrapper.text()).toContain('payment.methods.balance_pay')
+    expect(wrapper.text()).toContain('payment.balancePay.insufficientShort')
+    const balanceButton = wrapper.findAll('button').find((button) => button.text().includes('payment.methods.balance_pay'))
+    expect(balanceButton?.attributes('disabled')).toBeDefined()
+
+    const usdtButton = wrapper.findAll('button').find((button) => button.text().includes('payment.methods.usdt'))
+    const stripeButton = wrapper.findAll('button').find((button) => button.text().includes('payment.methods.stripe'))
+    expect(usdtButton?.attributes('disabled')).toBeUndefined()
+    expect(stripeButton?.attributes('disabled')).toBeUndefined()
+  })
+
+  it('shows the explicit insufficient balance error even when user refresh fails', async () => {
+    authUserState.balance = 100
+    refreshUser.mockRejectedValueOnce(new Error('user refresh failed'))
+    createOrder.mockRejectedValue({
+      reason: 'INSUFFICIENT_BALANCE',
+      metadata: {
+        current_balance: '10.00',
+        required_balance: '35.90',
+        deficit: '25.90',
+      },
+    })
+
+    const wrapper = await mountAndSelectSubscriptionPlan()
+
+    const balanceButton = wrapper.findAll('button').find((button) => button.text().includes('payment.methods.balance_pay'))
+    await balanceButton!.trigger('click')
+    const submitButton = wrapper.findAll('button').find((button) => button.text().includes('payment.createOrder'))
+    await submitButton!.trigger('click')
+    await flushPromises()
+
+    expect(refreshUser).toHaveBeenCalled()
+    expect(showError).toHaveBeenCalledWith(expect.stringContaining('payment.balancePay.insufficient'))
+    expect(showError).toHaveBeenCalledWith(expect.stringContaining('payment.balancePay.insufficientHint'))
   })
 })
