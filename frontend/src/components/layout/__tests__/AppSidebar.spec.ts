@@ -2,7 +2,67 @@ import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { describe, expect, it } from 'vitest'
+import { shallowMount, RouterLinkStub } from '@vue/test-utils'
+import { describe, expect, it, vi } from 'vitest'
+import AppSidebar from '../AppSidebar.vue'
+
+const appStore = vi.hoisted(() => ({
+  backendModeEnabled: false,
+  cachedPublicSettings: {},
+  mobileOpen: false,
+  publicSettingsLoaded: true,
+  setMobileOpen: vi.fn(),
+  sidebarCollapsed: false,
+  sidebarScrollTop: 0,
+  siteLogo: '',
+  siteName: 'Sub2API',
+  siteVersion: 'v0.1.151',
+  toggleSidebar: vi.fn(),
+}))
+
+const authStore = vi.hoisted(() => ({
+  isAdmin: false,
+  isSimpleMode: false,
+}))
+
+vi.mock('vue-router', () => ({
+  useRoute: () => ({ path: '/dashboard' }),
+  useRouter: () => ({ push: vi.fn() }),
+}))
+
+vi.mock('vue-i18n', async () => {
+  const actual = await vi.importActual<typeof import('vue-i18n')>('vue-i18n')
+  return {
+    ...actual,
+    useI18n: () => ({ t: (key: string) => key }),
+  }
+})
+
+vi.mock('@/stores', () => ({
+  useAdminSettingsStore: () => ({
+    customMenuItems: [],
+    fetch: vi.fn(),
+    opsMonitoringEnabled: false,
+    paymentEnabled: true,
+  }),
+  useAppStore: () => appStore,
+  useAuthStore: () => authStore,
+  useOnboardingStore: () => ({
+    isCurrentStep: () => false,
+    nextStep: vi.fn(),
+  }),
+}))
+
+vi.mock('@/stores/app', () => ({
+  useAppStore: () => appStore,
+}))
+
+vi.mock('@/composables/useBatchImageAccess', () => ({
+  useBatchImageAccess: () => ({
+    canUseBatchImage: { value: false },
+    refreshBatchImageAccess: vi.fn().mockResolvedValue(false),
+  }),
+}))
 
 const componentPath = resolve(dirname(fileURLToPath(import.meta.url)), '../AppSidebar.vue')
 const componentSource = readFileSync(componentPath, 'utf8')
@@ -51,5 +111,26 @@ describe('AppSidebar header styles', () => {
     expect(sidebarBrandBlockMatch).not.toBeNull()
     expect(sidebarHeaderBlockMatch?.[0]).not.toContain('@apply overflow-hidden;')
     expect(sidebarBrandBlockMatch?.[0]).not.toContain('overflow: hidden;')
+  })
+})
+
+describe('AppSidebar image Studio entry', () => {
+  it('renders the image generator as real user navigation data', () => {
+    const wrapper = shallowMount(AppSidebar, {
+      global: {
+        stubs: {
+          RouterLink: RouterLinkStub,
+          VersionBadge: true,
+          Transition: false,
+        },
+      },
+    })
+
+    const studioLink = wrapper
+      .findAllComponents(RouterLinkStub)
+      .find(link => link.props('to') === '/image-generator')
+
+    expect(studioLink).toBeDefined()
+    expect(studioLink?.text()).toContain('nav.generateImages')
   })
 })

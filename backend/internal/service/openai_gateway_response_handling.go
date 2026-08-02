@@ -19,6 +19,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+	"go.uber.org/zap"
 )
 
 // openaiStreamingResult streaming response result
@@ -28,6 +29,7 @@ type openaiStreamingResult struct {
 	responseID       string
 	imageCount       int
 	imageOutputSizes []string
+	imageTrace       []openAIImageOutputDiagnostic
 }
 
 type openaiNonStreamingResult struct {
@@ -36,6 +38,7 @@ type openaiNonStreamingResult struct {
 	responseID       string
 	imageCount       int
 	imageOutputSizes []string
+	imageTrace       []openAIImageOutputDiagnostic
 }
 
 func (s *OpenAIGatewayService) handleStreamingResponse(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, startTime time.Time, originalModel, mappedModel string) (*openaiStreamingResult, error) {
@@ -295,6 +298,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			responseID:       responseID,
 			imageCount:       imageCounter.Count(),
 			imageOutputSizes: imageCounter.Sizes(),
+			imageTrace:       imageCounter.Diagnostics(),
 		}
 	}
 	flushPending := func(disconnectMessage string) {
@@ -1174,12 +1178,14 @@ func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, r
 		c.Data(resp.StatusCode, contentType, body)
 	}
 
+	imageCount, imageTrace := analyzeOpenAIResponseImageOutputsFromJSONBytes(body)
 	return &openaiNonStreamingResult{
 		OpenAIUsage:      usage,
 		usage:            usage,
 		responseID:       extractOpenAIResponseIDFromJSONBytes(body),
-		imageCount:       countOpenAIResponseImageOutputsFromJSONBytes(body),
+		imageCount:       imageCount,
 		imageOutputSizes: collectOpenAIResponseImageOutputSizesFromJSONBytes(body),
+		imageTrace:       imageTrace,
 	}, nil
 }
 
@@ -1268,13 +1274,52 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 		c.Data(resp.StatusCode, contentType, body)
 	}
 
+	imageCount, imageTrace := analyzeOpenAIImageOutputsFromSSEBody(bodyText)
 	return &openaiNonStreamingResult{
 		OpenAIUsage:      usage,
 		usage:            usage,
 		responseID:       extractOpenAIResponseIDFromJSONBytes(body),
-		imageCount:       countOpenAIImageOutputsFromSSEBody(bodyText),
+		imageCount:       imageCount,
 		imageOutputSizes: collectOpenAIImageOutputSizesFromSSEBody(bodyText),
+		imageTrace:       imageTrace,
 	}, nil
+}
+
+func logOpenAIResponsesImageOutputAccountingDiagnostic(
+	ctx context.Context,
+	c *gin.Context,
+	pathKind string,
+	requestedModel string,
+	upstreamModel string,
+	imageCount int,
+	usage *OpenAIUsage,
+	trace []openAIImageOutputDiagnostic,
+) {
+	if imageCount <= 0 || usage == nil || usage.ImageOutputTokens > 0 || c == nil || c.Request == nil {
+		return
+	}
+	path := strings.TrimSpace(c.Request.URL.Path)
+	if path != openAIResponsesEndpoint && path != "/responses" {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	logger.FromContext(ctx).With(
+		zap.String("component", "service.openai_gateway"),
+		zap.String("diagnostic", "responses_image_count_without_image_tokens"),
+		zap.String("path_kind", strings.TrimSpace(pathKind)),
+		zap.String("path", path),
+		zap.String("client_request_id", c.GetHeader("X-Client-Request-ID")),
+		zap.Int64("api_key_id", getAPIKeyIDFromContext(c)),
+		zap.String("requested_model", strings.TrimSpace(requestedModel)),
+		zap.String("upstream_model", strings.TrimSpace(upstreamModel)),
+		zap.Int("image_count", imageCount),
+		zap.Int("input_tokens", usage.InputTokens),
+		zap.Int("output_tokens", usage.OutputTokens),
+		zap.Int("image_output_tokens", usage.ImageOutputTokens),
+		zap.Any("image_output_trace", trace),
+	).Warn("OpenAI Responses image output counter produced image_count without image output tokens")
 }
 
 func extractOpenAISSETerminalEvent(body string) (string, []byte, bool) {

@@ -243,6 +243,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	responseID := ""
 	imageCount := 0
 	var imageOutputSizes []string
+	var imageTrace []openAIImageOutputDiagnostic
 	if reqStream {
 		result, err := s.handleStreamingResponsePassthrough(ctx, resp, c, account, startTime, reqModel, upstreamPassthroughModel)
 		if err != nil {
@@ -253,6 +254,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		responseID = strings.TrimSpace(result.responseID)
 		imageCount = result.imageCount
 		imageOutputSizes = result.imageOutputSizes
+		imageTrace = result.imageTrace
 	} else {
 		result, err := s.handleNonStreamingResponsePassthrough(ctx, resp, c, reqModel, upstreamPassthroughModel)
 		if err != nil {
@@ -262,6 +264,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		responseID = strings.TrimSpace(result.responseID)
 		imageCount = result.imageCount
 		imageOutputSizes = result.imageOutputSizes
+		imageTrace = result.imageTrace
 	}
 	s.bindHTTPResponseAccount(ctx, c, account, responseID)
 
@@ -295,6 +298,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		forwardResult.ImageInputSize = imageInputSize
 		forwardResult.ImageOutputSizes = imageOutputSizes
 		forwardResult.BillingModel = imageBillingModel
+		logOpenAIResponsesImageOutputAccountingDiagnostic(ctx, c, "passthrough", reqModel, upstreamPassthroughModel, imageCount, usage, imageTrace)
 	}
 	return forwardResult, nil
 }
@@ -724,6 +728,7 @@ type openaiStreamingResultPassthrough struct {
 	responseID       string
 	imageCount       int
 	imageOutputSizes []string
+	imageTrace       []openAIImageOutputDiagnostic
 }
 
 type openaiNonStreamingResultPassthrough struct {
@@ -732,6 +737,7 @@ type openaiNonStreamingResultPassthrough struct {
 	responseID       string
 	imageCount       int
 	imageOutputSizes []string
+	imageTrace       []openAIImageOutputDiagnostic
 }
 
 func openAIStreamClientOutputStarted(c *gin.Context, localStarted bool) bool {
@@ -1095,6 +1101,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			responseID:       responseID,
 			imageCount:       imageCounter.Count(),
 			imageOutputSizes: imageCounter.Sizes(),
+			imageTrace:       imageCounter.Diagnostics(),
 		}
 	}
 
@@ -1329,12 +1336,14 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 	if !writeOpenAICompactSSEBridge(c, resp.StatusCode, body) {
 		c.Data(resp.StatusCode, contentType, body)
 	}
+	imageCount, imageTrace := analyzeOpenAIResponseImageOutputsFromJSONBytes(body)
 	return &openaiNonStreamingResultPassthrough{
 		OpenAIUsage:      usage,
 		usage:            usage,
 		responseID:       extractOpenAIResponseIDFromJSONBytes(body),
-		imageCount:       countOpenAIResponseImageOutputsFromJSONBytes(body),
+		imageCount:       imageCount,
 		imageOutputSizes: collectOpenAIResponseImageOutputSizesFromJSONBytes(body),
+		imageTrace:       imageTrace,
 	}, nil
 }
 
@@ -1401,12 +1410,14 @@ func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c
 		c.Data(resp.StatusCode, contentType, body)
 	}
 
+	imageCount, imageTrace := analyzeOpenAIImageOutputsFromSSEBody(bodyText)
 	return &openaiNonStreamingResultPassthrough{
 		OpenAIUsage:      usage,
 		usage:            usage,
 		responseID:       extractOpenAIResponseIDFromJSONBytes(body),
-		imageCount:       countOpenAIImageOutputsFromSSEBody(bodyText),
+		imageCount:       imageCount,
 		imageOutputSizes: collectOpenAIImageOutputSizesFromSSEBody(bodyText),
+		imageTrace:       imageTrace,
 	}, nil
 }
 

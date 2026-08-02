@@ -58,6 +58,16 @@ export default {
     dockerRecreate: '重新创建容器'
   },
 
+  imageGenerator: {
+    title: '生成图片',
+    subtitle: '正在同步登录状态，准备打开 Omni Image Studio。',
+    syncing: '正在同步 OmniAPI 登录状态...',
+    studioTitle: 'Omni Image Studio',
+    studioDescription: '使用你的 OmniAPI Key 进入新版图片工作台，支持 gpt-image-2 生图、作品集和 R2 存储。',
+    studioButton: '打开 Omni Image Studio',
+    retentionNotice: '图片仅保存 30 天，请及时下载重要图片。'
+  },
+
   // Recharge / Subscription Page
   purchase: {
     title: '充值/订阅',

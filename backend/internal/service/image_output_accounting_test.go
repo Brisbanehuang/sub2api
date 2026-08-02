@@ -207,12 +207,17 @@ func TestOpenAIImageOutputCounter_AddDataArray_FromVariousSources(t *testing.T) 
 			json: `{"type":"response.done","response":{"id":"r1","output":[]},"data":[]}`,
 		},
 		{
-			name: "response with single-element data array",
-			json: `{"type":"response.done","response":{"id":"r1","output":[]},"data":[{"url":"https://example.com/img.png"}]}`,
+			name:     "response with single-element data array",
+			json:     `{"type":"response.done","response":{"id":"r1","output":[]},"data":[{"url":"https://example.com/img.png"}]}`,
+			expected: 1,
 		},
 		{
 			name: "image_generation.completed event without result",
 			json: `{"type":"image_generation.completed","item":{"type":"image_generation.completed","id":"call_1"}}`,
+		},
+		{
+			name: "image_edit.completed event without result",
+			json: `{"type":"image_edit.completed","item":{"type":"image_edit.completed","id":"call_2"}}`,
 		},
 		{
 			name: "output_item with empty type",
@@ -224,8 +229,9 @@ func TestOpenAIImageOutputCounter_AddDataArray_FromVariousSources(t *testing.T) 
 		t.Run(tt.name, func(t *testing.T) {
 			counter := newOpenAIImageOutputCounter()
 			counter.AddSSEData([]byte(tt.json))
-			count := counter.Count()
-			t.Logf("  count=%d (maxDataCount=%d, count=%d)", count, counter.maxDataCount, counter.count)
+			if count := counter.Count(); count != tt.expected {
+				t.Fatalf("expected %d images, got %d", tt.expected, count)
+			}
 		})
 	}
 }
@@ -250,5 +256,24 @@ func TestOpenAIImageOutputCounter_AddJSONResponse_Exported(t *testing.T) {
 			count := countOpenAIResponseImageOutputsFromJSONBytes([]byte(tt.json))
 			t.Logf("  count=%d", count)
 		})
+	}
+}
+
+func TestOpenAIImageOutputCounterDiagnosticsAreRedacted(t *testing.T) {
+	body := []byte(`{"data":[{"b64_json":"secret-base64","url":"https://secret.example/image.png","size":"1024x1024"}]}`)
+
+	count, diagnostics := analyzeOpenAIResponseImageOutputsFromJSONBytes(body)
+
+	if count != 1 {
+		t.Fatalf("expected 1 image, got %d", count)
+	}
+	if len(diagnostics) != 1 {
+		t.Fatalf("expected 1 diagnostic, got %d", len(diagnostics))
+	}
+	if diagnostics[0].Source != "json.data" {
+		t.Fatalf("expected json.data source, got %q", diagnostics[0].Source)
+	}
+	if !diagnostics[0].HasB64JSON || !diagnostics[0].HasURL {
+		t.Fatalf("expected redacted presence flags for b64_json and url: %+v", diagnostics[0])
 	}
 }

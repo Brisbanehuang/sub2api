@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
+import enDashboard from '@/i18n/locales/en/dashboard'
+import zhDashboard from '@/i18n/locales/zh/dashboard'
 
 const { copyToClipboardMock } = vi.hoisted(() => ({
   copyToClipboardMock: vi.fn().mockResolvedValue(true)
@@ -300,12 +302,14 @@ describe('UseKeyModal', () => {
 
     expect(apiKeyMode.attributes('aria-checked')).toBe('true')
     expect(configToml).toBeDefined()
+    expect(configToml).not.toContain('supports_websockets = true')
     expect(configToml).toContain('requires_openai_auth = false')
+    expect(configToml).toContain('env_key = "SUB2API_API_KEY"')
     expect(configToml).toContain('http_headers = { "x-openai-actor-authorization" = "local-image-extension" }')
-    expect(configToml).not.toContain('env_key')
-    expect(configToml).not.toContain('image_generation')
-    expect(codeBlocks).toContain('{\n  "OPENAI_API_KEY": "sk-test"\n}')
-    expect(wrapper.text()).toContain('auth.json')
+    expect(configToml).toContain('[features]\nimage_generation = true\ngoals = true')
+    expect(configToml).not.toContain('responses_websockets_v2')
+    expect(codeBlocks).toContain('export SUB2API_API_KEY="sk-test"')
+    expect(wrapper.text()).not.toContain('auth.json')
 
     const restartNotice = wrapper.get('[data-testid="codex-api-key-restart-notice"]')
     expect(restartNotice.text()).toContain(
@@ -404,12 +408,14 @@ describe('UseKeyModal', () => {
     expect(wrapper.get('[data-testid="codex-auth-mode-api-key"]').attributes('aria-checked')).toBe('true')
     expect(configToml).toBeDefined()
     expect(configToml).toContain('requires_openai_auth = false')
+    expect(configToml).toContain('env_key = "SUB2API_API_KEY"')
     expect(configToml).toContain('http_headers = { "x-openai-actor-authorization" = "local-image-extension" }')
-    expect(configToml).not.toContain('env_key')
-    expect(configToml).not.toContain('image_generation')
+    expect(configToml).toContain('image_generation = true')
     expect(configToml).toContain('supports_websockets = true')
-    expect(configToml).toContain('[features]\nresponses_websockets_v2 = true\ngoals = true')
-    expect(codeBlocks).toContain('{\n  "OPENAI_API_KEY": "sk-test"\n}')
+    expect(configToml).toContain('[features]\nimage_generation = true\ngoals = true')
+    expect(configToml).not.toContain('responses_websockets_v2')
+    expect(codeBlocks).toContain('export SUB2API_API_KEY="sk-test"')
+    expect(wrapper.text()).not.toContain('auth.json')
   })
 
   it('resets Codex authentication mode when the modal reopens or platform changes', async () => {
@@ -447,6 +453,113 @@ describe('UseKeyModal', () => {
 
     expect(wrapper.get('[data-testid="codex-auth-mode-legacy"]').attributes('aria-checked')).toBe('true')
     expect(wrapper.findAll('pre code').map((code) => code.text()).join('\n')).not.toContain('x-openai-actor-authorization')
+  })
+
+  it('renders the PowerShell API key command in OpenAI Codex Windows mode', async () => {
+    const wrapper = mount(UseKeyModal, {
+      props: {
+        show: true,
+        apiKey: 'sk-test',
+        baseUrl: 'https://example.com/v1',
+        platform: 'openai'
+      },
+      global: {
+        stubs: {
+          BaseDialog: {
+            template: '<div><slot /><slot name="footer" /></div>'
+          },
+          Icon: {
+            template: '<span />'
+          }
+        }
+      }
+    })
+
+    await wrapper.get('[data-testid="codex-auth-mode-api-key"]').trigger('click')
+    const windowsTab = wrapper.findAll('button').find(
+      (button) => button.text().trim() === 'Windows'
+    )
+    expect(windowsTab).toBeDefined()
+    await windowsTab!.trigger('click')
+    await nextTick()
+
+    const codeBlocks = wrapper.findAll('pre code').map((code) => code.text())
+    expect(codeBlocks).toContain('$env:SUB2API_API_KEY="sk-test"')
+    expect(wrapper.text()).not.toContain('auth.json')
+  })
+
+  it('renders the PowerShell API key command in OpenAI Codex WebSocket Windows mode', async () => {
+    const wrapper = mount(UseKeyModal, {
+      props: {
+        show: true,
+        apiKey: 'sk-test',
+        baseUrl: 'https://example.com/v1',
+        platform: 'openai'
+      },
+      global: {
+        stubs: {
+          BaseDialog: {
+            template: '<div><slot /><slot name="footer" /></div>'
+          },
+          Icon: {
+            template: '<span />'
+          }
+        }
+      }
+    })
+
+    await wrapper.get('[data-testid="codex-auth-mode-api-key"]').trigger('click')
+    const wsTab = wrapper.findAll('button').find((button) =>
+      button.text().includes('keys.useKeyModal.cliTabs.codexCliWs')
+    )
+    expect(wsTab).toBeDefined()
+    await wsTab!.trigger('click')
+    const windowsTab = wrapper.findAll('button').find(
+      (button) => button.text().trim() === 'Windows'
+    )
+    expect(windowsTab).toBeDefined()
+    await windowsTab!.trigger('click')
+    await nextTick()
+
+    const codeBlocks = wrapper.findAll('pre code').map((code) => code.text())
+    expect(codeBlocks).toContain('$env:SUB2API_API_KEY="sk-test"')
+    expect(wrapper.text()).not.toContain('auth.json')
+  })
+
+  it('renders the API key restart hint for OpenAI Codex setup', async () => {
+    const wrapper = mount(UseKeyModal, {
+      props: {
+        show: true,
+        apiKey: 'sk-test',
+        baseUrl: 'https://example.com/v1',
+        platform: 'openai'
+      },
+      global: {
+        stubs: {
+          BaseDialog: {
+            template: '<div><slot /><slot name="footer" /></div>'
+          },
+          Icon: {
+            template: '<span />'
+          }
+        }
+      }
+    })
+
+    await wrapper.get('[data-testid="codex-auth-mode-api-key"]').trigger('click')
+    expect(wrapper.text()).toContain('keys.useKeyModal.openai.apiKeyEnvHint')
+  })
+
+  it('documents restart requirements and API key modes in both dashboard locales', () => {
+    expect(enDashboard.keys.useKeyModal.openai.apiKeyEnvHint).toContain('fully restart Codex')
+    expect(enDashboard.keys.useKeyModal.openai.apiKeyEnvHint).toContain('new task')
+    expect(zhDashboard.keys.useKeyModal.openai.apiKeyEnvHint).toContain('完全重启 Codex')
+    expect(zhDashboard.keys.useKeyModal.openai.apiKeyEnvHint).toContain('新建任务')
+
+    expect(enDashboard.keys.useKeyModal.cliTabs.codexCli).toBe('Codex CLI')
+    expect(enDashboard.keys.useKeyModal.cliTabs.codexCliWs).toBe('Codex CLI (WebSocket)')
+    expect(zhDashboard.keys.useKeyModal.cliTabs.codexCli).toBe('Codex CLI')
+    expect(zhDashboard.keys.useKeyModal.cliTabs.codexCliWs).toBe('Codex CLI (WebSocket)')
   })
 
   it('renders GPT-5.4 mini entry in OpenCode config', async () => {

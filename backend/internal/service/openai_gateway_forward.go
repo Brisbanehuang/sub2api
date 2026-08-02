@@ -929,6 +929,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		responseID := ""
 		imageCount := 0
 		var imageOutputSizes []string
+		var imageTrace []openAIImageOutputDiagnostic
 		if reqStream {
 			streamResult, err := s.handleStreamingResponseWithReasoning(ctx, resp, c, account, startTime, originalModel, upstreamModel, reasoningEffortValue)
 			if err != nil {
@@ -939,6 +940,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			responseID = strings.TrimSpace(streamResult.responseID)
 			imageCount = streamResult.imageCount
 			imageOutputSizes = streamResult.imageOutputSizes
+			imageTrace = streamResult.imageTrace
 		} else {
 			nonStreamResult, err := s.handleNonStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel)
 			if err != nil {
@@ -948,6 +950,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			responseID = strings.TrimSpace(nonStreamResult.responseID)
 			imageCount = nonStreamResult.imageCount
 			imageOutputSizes = nonStreamResult.imageOutputSizes
+			imageTrace = nonStreamResult.imageTrace
 		}
 		s.bindHTTPResponseAccount(ctx, c, account, responseID)
 
@@ -983,6 +986,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			forwardResult.ImageInputSize = imageInputSize
 			forwardResult.ImageOutputSizes = imageOutputSizes
 			forwardResult.BillingModel = imageBillingModel
+			logOpenAIResponsesImageOutputAccountingDiagnostic(ctx, c, "native", originalModel, upstreamModel, imageCount, usage, imageTrace)
 		}
 		return forwardResult, nil
 	}

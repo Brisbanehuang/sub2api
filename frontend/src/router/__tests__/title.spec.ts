@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { resolveDocumentTitle, resolveRouteDocumentTitle } from '@/router/title'
+
+const routerSource = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../index.ts'), 'utf8')
 
 describe('resolveDocumentTitle', () => {
   it('路由存在标题时，使用“路由标题 - 站点名”格式', () => {
@@ -45,5 +50,14 @@ describe('resolveRouteDocumentTitle', () => {
         sort_order: 0
       }
     ])).toBe('账号调度器 - EzouAPI')
+  })
+})
+
+describe('custom bridge routes', () => {
+  it('keeps the Studio and Feishu login bridge routes registered', () => {
+    expect(routerSource).toContain("path: '/image-generator'")
+    expect(routerSource).toContain("name: 'ImageGenerator'")
+    expect(routerSource).toContain("path: '/feishu-integration'")
+    expect(routerSource).toContain("name: 'FeishuIntegration'")
   })
 })

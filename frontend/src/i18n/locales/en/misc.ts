@@ -59,6 +59,16 @@ export default {
     dockerRecreate: 'Recreate the container'
   },
 
+  imageGenerator: {
+    title: 'Generate Images',
+    subtitle: 'Syncing your session before opening Omni Image Studio.',
+    syncing: 'Syncing OmniAPI session...',
+    studioTitle: 'Omni Image Studio',
+    studioDescription: 'Use your OmniAPI key in the new image workspace with gpt-image-2 generation, gallery, and R2 storage.',
+    studioButton: 'Open Omni Image Studio',
+    retentionNotice: 'Images are kept for 30 days. Download important images in time.'
+  },
+
   // Recharge / Subscription Page
   purchase: {
     title: 'Recharge / Subscription',

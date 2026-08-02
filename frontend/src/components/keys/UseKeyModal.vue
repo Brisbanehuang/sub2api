@@ -725,12 +725,22 @@ wire_api = "responses"
 ${generateCodexProviderAuthConfig()}
 
 [features]
-goals = true`
+${generateCodexFeaturesConfig(false)}`
 
-  // auth.json content
-  const authContent = `{
+  const credentialFile = codexAuthMode.value === 'api-key'
+    ? {
+        path: isWindows ? 'PowerShell' : 'Terminal',
+        content: isWindows
+          ? `$env:SUB2API_API_KEY="${apiKey}"`
+          : `export SUB2API_API_KEY="${apiKey}"`,
+        hint: t('keys.useKeyModal.openai.apiKeyEnvHint')
+      }
+    : {
+        path: `${configDir}/auth.json`,
+        content: `{
   "OPENAI_API_KEY": "${apiKey}"
 }`
+      }
 
   return [
     {
@@ -738,20 +748,25 @@ goals = true`
       content: configContent,
       hint: t('keys.useKeyModal.openai.configTomlHint')
     },
-    {
-      path: `${configDir}/auth.json`,
-      content: authContent
-    }
+    credentialFile
   ]
 }
 
 function generateCodexProviderAuthConfig(): string {
   if (codexAuthMode.value === 'api-key') {
     return `requires_openai_auth = false
+env_key = "SUB2API_API_KEY"
 http_headers = { "x-openai-actor-authorization" = "local-image-extension" }`
   }
 
   return 'requires_openai_auth = true'
+}
+
+function generateCodexFeaturesConfig(websockets: boolean): string {
+  if (codexAuthMode.value === 'api-key') {
+    return 'image_generation = true\ngoals = true'
+  }
+  return websockets ? 'responses_websockets_v2 = true\ngoals = true' : 'goals = true'
 }
 
 function generateGrokFiles(baseUrl: string, apiKey: string): FileConfig[] {
@@ -818,7 +833,7 @@ function generateOpenAIWsFiles(baseUrl: string, apiKey: string): FileConfig[] {
   const isWindows = activeTab.value === 'windows'
   const configDir = isWindows ? '%userprofile%\\.codex' : '~/.codex'
 
-  // config.toml content with WebSocket v2
+  // config.toml content with WebSocket support
   const configContent = `model_provider = "OpenAI"
 model = "gpt-5.5"
 review_model = "gpt-5.5"
@@ -835,13 +850,22 @@ supports_websockets = true
 ${generateCodexProviderAuthConfig()}
 
 [features]
-responses_websockets_v2 = true
-goals = true`
+${generateCodexFeaturesConfig(true)}`
 
-  // auth.json content
-  const authContent = `{
+  const credentialFile = codexAuthMode.value === 'api-key'
+    ? {
+        path: isWindows ? 'PowerShell' : 'Terminal',
+        content: isWindows
+          ? `$env:SUB2API_API_KEY="${apiKey}"`
+          : `export SUB2API_API_KEY="${apiKey}"`,
+        hint: t('keys.useKeyModal.openai.apiKeyEnvHint')
+      }
+    : {
+        path: `${configDir}/auth.json`,
+        content: `{
   "OPENAI_API_KEY": "${apiKey}"
 }`
+      }
 
   return [
     {
@@ -849,10 +873,7 @@ goals = true`
       content: configContent,
       hint: t('keys.useKeyModal.openai.configTomlHint')
     },
-    {
-      path: `${configDir}/auth.json`,
-      content: authContent
-    }
+    credentialFile
   ]
 }
 

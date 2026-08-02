@@ -204,6 +204,28 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/image-generator',
+    name: 'ImageGenerator',
+    component: () => import('@/views/user/ImageGeneratorView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: false,
+      title: 'Generate Images',
+      titleKey: 'imageGenerator.title',
+      descriptionKey: 'imageGenerator.subtitle'
+    }
+  },
+  {
+    path: '/feishu-integration',
+    name: 'FeishuIntegration',
+    component: () => import('@/views/user/FeishuIntegrationView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: false,
+      title: 'Feishu Integration'
+    }
+  },
+  {
     path: '/keys',
     name: 'Keys',
     component: () => import('@/views/user/KeysView.vue'),
