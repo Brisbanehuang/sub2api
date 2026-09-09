@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/stretchr/testify/require"
@@ -187,6 +188,20 @@ func requireSameAsNoRouting(t *testing.T, advanced bool, group *Group, requested
 	require.Equal(t, without, withRules, "路由未生效时选号必须与无规则时一致")
 }
 
+// bindOpenAIRoutingTestSticky 建立一条真实的会话粘性绑定。
+//
+// 必须走 service 的写入口：粘性缓存 key 由 openAISessionCacheKey 加上 "openai:"
+// 前缀，直接往 stub cache 里写裸 sessionHash，调度侧读不回来——绑定静默不存在，
+// 用例会在"根本没有粘性"的前提下通过，证明不了任何事。
+func bindOpenAIRoutingTestSticky(t *testing.T, svc *OpenAIGatewayService, sessionHash string, accountID int64) {
+	t.Helper()
+	groupID := openAIRoutingTestGroupID
+	require.NoError(t, svc.setStickySessionAccountID(context.Background(), &groupID, sessionHash, accountID, time.Minute))
+	bound, err := svc.getStickySessionAccountID(context.Background(), &groupID, sessionHash)
+	require.NoError(t, err)
+	require.Equal(t, accountID, bound, "粘性绑定未真正建立，用例前提不成立")
+}
+
 func forEachOpenAIScheduler(t *testing.T, run func(t *testing.T, advanced bool)) {
 	t.Helper()
 	for _, advanced := range []bool{false, true} {
@@ -246,8 +261,7 @@ func TestOpenAIModelRouting_RoutedAccountBeatsSessionSticky(t *testing.T) {
 			advanced,
 		)
 		sessionHash := openAIRoutingStableSession
-		cache := svc.cache.(*schedulerTestGatewayCache)
-		require.NoError(t, cache.SetSessionAccountID(context.Background(), openAIRoutingTestGroupID, sessionHash, openAIRoutingTestPreferredID, 0))
+		bindOpenAIRoutingTestSticky(t, svc, sessionHash, openAIRoutingTestPreferredID)
 
 		selection, err := selectOpenAIRoutingTestAccount(t, svc, context.Background(), sessionHash, openAIRoutingTestModel, nil)
 		require.NoError(t, err)
@@ -381,9 +395,7 @@ func TestOpenAIModelRouting_RoutedAccountBeatsWeightedSticky(t *testing.T) {
 	)
 	svc.rateLimitService = newOpenAIAdvancedSchedulerRateLimitService("true", "true")
 
-	cache := svc.cache.(*schedulerTestGatewayCache)
-	require.NoError(t, cache.SetSessionAccountID(context.Background(), openAIRoutingTestGroupID,
-		openAIRoutingStableSession, openAIRoutingTestPreferredID, 0))
+	bindOpenAIRoutingTestSticky(t, svc, openAIRoutingStableSession, openAIRoutingTestPreferredID)
 
 	selection, err := selectOpenAIRoutingTestAccount(t, svc, context.Background(),
 		openAIRoutingStableSession, openAIRoutingTestModel, nil)
@@ -447,4 +459,162 @@ func TestOpenAIModelRouting_WeightedStickyFallbackRespectsRouting(t *testing.T) 
 		require.NotNil(t, selection.Account)
 		require.Equal(t, openAIRoutingTestRoutedID, selection.Account.ID)
 	})
+}
+
+// 软优先必须挺到最后一道门：候选收敛之后还有 compact 过滤、数据库终检和槽位获取。
+// 只把候选池换成路由子集是不够的——路由账号在这些环节全军覆没时，健康的备用账号
+// 会被一并丢掉，请求直接报无可用账号。
+func TestOpenAIModelRouting_FallsBackWhenRoutedAccountFailsLateGate(t *testing.T) {
+	forEachOpenAIScheduler(t, func(t *testing.T, advanced bool) {
+		accounts := openAIRoutingTestAccounts()
+		// 路由账号明确不支持 compact，备用账号支持。compact 过滤发生在候选收敛之后。
+		accounts[0].Extra["openai_compact_supported"] = false
+		accounts[1].Extra["openai_compact_supported"] = true
+		svc := newOpenAIModelRoutingTestService(
+			accounts,
+			openAIRoutingTestGroup(true, map[string][]int64{
+				openAIRoutingTestModel: {openAIRoutingTestRoutedID},
+			}),
+			advanced,
+		)
+		groupID := openAIRoutingTestGroupID
+		selection, _, err := svc.SelectAccountWithSchedulerForCapability(
+			context.Background(),
+			&groupID,
+			"",
+			openAIRoutingStableSession,
+			openAIRoutingTestModel,
+			nil,
+			OpenAIUpstreamTransportAny,
+			OpenAIEndpointCapabilityResponses,
+			true, // requireCompact
+			false,
+			false,
+		)
+		require.NoError(t, err, "路由账号过不了 compact 门时必须回落，而不是报无可用账号")
+		require.NotNil(t, selection)
+		require.NotNil(t, selection.Account)
+		require.Equal(t, openAIRoutingTestPreferredID, selection.Account.ID)
+	})
+}
+
+// legacy 调度没有独立的续话层，不可迁移的 previous_response 绑定完全由会话粘性
+// 承载。路由的粘性让位规则若不区分这一点，会把续话踢到另一个账号上，续话直接失败。
+func TestOpenAIModelRouting_NonMovableContinuationOutranksRouting(t *testing.T) {
+	forEachOpenAIScheduler(t, func(t *testing.T, advanced bool) {
+		svc := newOpenAIModelRoutingTestService(
+			openAIRoutingTestAccounts(),
+			openAIRoutingTestGroup(true, map[string][]int64{
+				openAIRoutingTestModel: {openAIRoutingTestRoutedID},
+			}),
+			advanced,
+		)
+		bindOpenAIRoutingTestSticky(t, svc, openAIRoutingStableSession, openAIRoutingTestPreferredID)
+
+		groupID := openAIRoutingTestGroupID
+		selection, _, err := svc.SelectAccountWithSchedulerForCapability(
+			context.Background(),
+			&groupID,
+			"resp_continuation_fixture",
+			openAIRoutingStableSession,
+			openAIRoutingTestModel,
+			nil,
+			OpenAIUpstreamTransportAny,
+			OpenAIEndpointCapabilityResponses,
+			false,
+			false, // previousResponseCanMove=false：绑定不可迁移
+			false,
+		)
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.NotNil(t, selection.Account)
+		require.Equal(t, openAIRoutingTestPreferredID, selection.Account.ID,
+			"不可迁移的续话绑定不得为路由让位")
+	})
+}
+
+// SelectAccountForModelWithExclusions 与 TokenCount 入口不预解析绑定，stickyAccountID
+// 传 0，由 tryStickySessionHit 自己从缓存读出来。让位判定必须落在解析之后，否则这些
+// 入口整段绕过路由。
+func TestOpenAIModelRouting_StickyBypassEntryStillRespectsRouting(t *testing.T) {
+	svc := newOpenAIModelRoutingTestService(
+		openAIRoutingTestAccounts(),
+		openAIRoutingTestGroup(true, map[string][]int64{
+			openAIRoutingTestModel: {openAIRoutingTestRoutedID},
+		}),
+		false,
+	)
+	bindOpenAIRoutingTestSticky(t, svc, openAIRoutingStableSession, openAIRoutingTestPreferredID)
+
+	groupID := openAIRoutingTestGroupID
+	ctx := svc.WithOpenAIModelRouting(context.Background(), &groupID, PlatformOpenAI, openAIRoutingTestModel)
+	account, err := svc.SelectAccountForModelWithExclusions(ctx, &groupID, openAIRoutingStableSession, openAIRoutingTestModel, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	require.Equal(t, openAIRoutingTestRoutedID, account.ID,
+		"入参未带绑定 ID 的入口同样不得让粘性压过路由")
+}
+
+// 批量负载路径（LoadBatchEnabled）是另一条独立分支，此前用例统一关掉了它。
+func TestOpenAIModelRouting_LoadBatchPathHonorsRouting(t *testing.T) {
+	forEachOpenAIScheduler(t, func(t *testing.T, advanced bool) {
+		svc := newOpenAIModelRoutingTestService(
+			openAIRoutingTestAccounts(),
+			openAIRoutingTestGroup(true, map[string][]int64{
+				openAIRoutingTestModel: {openAIRoutingTestRoutedID},
+			}),
+			advanced,
+		)
+		svc.cfg.Gateway.Scheduling.LoadBatchEnabled = true
+
+		selection, err := selectOpenAIRoutingTestAccount(t, svc, context.Background(),
+			openAIRoutingStableSession, openAIRoutingTestModel, nil)
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.NotNil(t, selection.Account)
+		require.Equal(t, openAIRoutingTestRoutedID, selection.Account.ID)
+	})
+}
+
+// 通用网关（anthropic / gemini / antigravity，以及 composite 解析到它们时）同样
+// 必须按公开别名查表：Gemini handler 会先用 channelMapping.MappedModel 覆盖
+// modelName 再调度，composite 中间件也会改写请求体，直接拿调度参数查表会漏配。
+func TestModelRouting_GenericGatewayMatchesPublicAlias(t *testing.T) {
+	const (
+		publicAlias  = "gemini-2.5-pro"
+		mappedModel  = "gemini-2.5-pro-upstream"
+		routedID     = int64(84501)
+		genericGroup = int64(93501)
+	)
+	group := &Group{
+		ID:                  genericGroup,
+		Platform:            PlatformGemini,
+		Status:              StatusActive,
+		ModelRoutingEnabled: true,
+		ModelRouting:        map[string][]int64{publicAlias: {routedID}},
+	}
+	svc := &GatewayService{groupRepo: openAIRoutingTestGroupRepo{group: group}}
+	groupID := genericGroup
+
+	t.Run("public alias recorded on the request wins", func(t *testing.T) {
+		ctx := WithRequestedPublicModel(context.Background(), publicAlias)
+		require.Equal(t, []int64{routedID},
+			svc.routingAccountIDsForRequest(ctx, &groupID, mappedModel, PlatformGemini))
+	})
+
+	t.Run("falls back to the scheduling parameter when nothing was recorded", func(t *testing.T) {
+		require.Equal(t, []int64{routedID},
+			svc.routingAccountIDsForRequest(context.Background(), &groupID, publicAlias, PlatformGemini))
+		require.Nil(t,
+			svc.routingAccountIDsForRequest(context.Background(), &groupID, mappedModel, PlatformGemini))
+	})
+}
+
+// 两套调度栈共用同一个查表模型名解析，语义必须一致。
+func TestModelRoutingLookupModel(t *testing.T) {
+	require.Equal(t, "public-alias",
+		modelRoutingLookupModel(WithRequestedPublicModel(context.Background(), "public-alias"), "mapped-model"))
+	require.Equal(t, "mapped-model",
+		modelRoutingLookupModel(context.Background(), "mapped-model"))
+	require.Equal(t, "", modelRoutingLookupModel(context.Background(), "   "))
 }

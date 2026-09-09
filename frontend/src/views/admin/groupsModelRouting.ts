@@ -2,7 +2,7 @@
 //
 // 路由规则本身与平台无关，但只有接线过的调度栈才会读取它：
 //   - anthropic / gemini / antigravity 走通用网关 GatewayService
-//   - openai / grok / kimi / zhipu / deepseek 走 OpenAIGatewayService
+//   - openai / grok / kimi / zhipu / deepseek / minimax 走 OpenAIGatewayService
 //   - composite 按解析出的目标平台落到上述两者之一
 // 未接线的平台不展示该配置块，避免出现"规则能存能显示但不生效"的界面。
 
@@ -15,6 +15,7 @@ export const MODEL_ROUTING_PLATFORMS = [
   "kimi",
   "zhipu",
   "deepseek",
+  "minimax",
   "composite",
 ] as const;
 

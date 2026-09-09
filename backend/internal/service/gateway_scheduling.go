@@ -254,7 +254,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 	var routingAccountIDs []int64
 	if group != nil && requestedModel != "" &&
 		modelRoutingAppliesToPlatform(platform, group.Platform) {
-		routingAccountIDs = group.GetRoutingAccountIDs(requestedModel)
+		routingAccountIDs = group.GetRoutingAccountIDs(modelRoutingLookupModel(ctx, requestedModel))
 		if s.debugModelRoutingEnabled() {
 			logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] context group routing: group_id=%d model=%s enabled=%v rules=%d matched_ids=%v session=%s sticky_account=%d",
 				group.ID, requestedModel, group.ModelRoutingEnabled, len(group.ModelRouting), routingAccountIDs, shortSessionHash(sessionHash), stickyAccountID)
@@ -916,7 +916,7 @@ func (s *GatewayService) routingAccountIDsForRequest(ctx context.Context, groupI
 		}
 		return nil
 	}
-	ids := group.GetRoutingAccountIDs(requestedModel)
+	ids := group.GetRoutingAccountIDs(modelRoutingLookupModel(ctx, requestedModel))
 	if s.debugModelRoutingEnabled() {
 		logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] routing lookup: group_id=%d model=%s enabled=%v rules=%d matched_ids=%v",
 			group.ID, requestedModel, group.ModelRoutingEnabled, len(group.ModelRouting), ids)

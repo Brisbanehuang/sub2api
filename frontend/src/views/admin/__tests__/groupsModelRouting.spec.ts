@@ -13,7 +13,14 @@ describe("supportsModelRoutingPlatform", () => {
   });
 
   it("放行走 OpenAI 调度栈的平台", () => {
-    for (const platform of ["openai", "grok", "kimi", "zhipu", "deepseek"]) {
+    for (const platform of [
+      "openai",
+      "grok",
+      "kimi",
+      "zhipu",
+      "deepseek",
+      "minimax",
+    ]) {
       expect(supportsModelRoutingPlatform(platform)).toBe(true);
     }
   });
@@ -23,7 +30,7 @@ describe("supportsModelRoutingPlatform", () => {
   });
 
   it("不放行未接线的平台，避免出现存了不生效的规则", () => {
-    for (const platform of ["minimax", "kiro", "", "unknown"]) {
+    for (const platform of ["kiro", "", "unknown"]) {
       expect(supportsModelRoutingPlatform(platform)).toBe(false);
     }
   });

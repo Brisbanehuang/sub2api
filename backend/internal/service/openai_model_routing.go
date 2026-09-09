@@ -34,7 +34,7 @@ func (s *OpenAIGatewayService) WithOpenAIModelRouting(ctx context.Context, group
 	if s == nil || ctx == nil {
 		return ctx
 	}
-	model := openAIModelRoutingLookupModel(ctx, requestedModel)
+	model := modelRoutingLookupModel(ctx, requestedModel)
 	if existing, ok := ctx.Value(openAIModelRoutingContextKey{}).(openAIModelRoutingSnapshot); ok &&
 		existing.groupID == derefGroupID(groupID) && existing.model == model {
 		return ctx
@@ -51,7 +51,7 @@ func (s *OpenAIGatewayService) openAIRoutedAccountIDs(ctx context.Context, group
 	if s == nil || ctx == nil {
 		return nil
 	}
-	model := openAIModelRoutingLookupModel(ctx, requestedModel)
+	model := modelRoutingLookupModel(ctx, requestedModel)
 	if cached, ok := ctx.Value(openAIModelRoutingContextKey{}).(openAIModelRoutingSnapshot); ok &&
 		cached.groupID == derefGroupID(groupID) && cached.model == model {
 		return cached.accountIDs
@@ -59,14 +59,14 @@ func (s *OpenAIGatewayService) openAIRoutedAccountIDs(ctx context.Context, group
 	return s.resolveOpenAIRoutedAccountIDs(ctx, groupID, platform, model)
 }
 
-// openAIModelRoutingLookupModel 决定用哪个模型名查表。
+// modelRoutingLookupModel 决定用哪个模型名查表。两套调度栈共用。
 //
-// 管理员在后台按"客户端书写的公开别名"配置规则，Anthropic 侧调度收到的也正是这个
-// 名字（gateway_handler 传 parsedReq.Model）。OpenAI 系 handler 传的却是渠道映射后的
-// forwardModel，composite 中间件还会把请求体里的模型改写成上游模型名。若直接拿调度
-// 参数查表，同一份规则在两类分组上的行为会不一致，因此优先使用请求链路上记录的公开
-// 别名，只有拿不到时才回落调度参数。
-func openAIModelRoutingLookupModel(ctx context.Context, requestedModel string) string {
+// 管理员在后台按"客户端书写的公开别名"配置规则。Anthropic 的 /v1/messages 恰好把
+// 该名字直接传给调度（parsedReq.Model），但这只是巧合：OpenAI 系 handler 传的是渠道
+// 映射后的 forwardModel，Gemini handler 会用 channelMapping.MappedModel 覆盖 modelName，
+// composite 中间件还会改写请求体里的模型名。任何一条这样的路径直接拿调度参数查表，
+// 规则都会漏配，因此统一优先使用请求链路上记录的公开别名，拿不到才回落调度参数。
+func modelRoutingLookupModel(ctx context.Context, requestedModel string) string {
 	if publicModel, ok := RequestedPublicModelFromContext(ctx); ok {
 		return publicModel
 	}
@@ -100,6 +100,46 @@ func openAIModelRoutingAppliesToGroup(group *Group, targetPlatform string) bool 
 		return true
 	}
 	return group.Platform == targetPlatform
+}
+
+type openAINonMovableContinuationContextKey struct{}
+
+// withOpenAINonMovableContinuation 标记本次请求带有不可迁移的续话绑定
+// （previous_response_id 且 previousResponseCanMove=false）。
+//
+// 高级调度有独立的 previous_response 层，能自己识别这类绑定；legacy 调度没有，
+// 该绑定完全由会话粘性承载。若不加区分地让粘性为路由让步，legacy 路径会把不可
+// 迁移的续话踢到另一个账号上，续话直接失败。
+func withOpenAINonMovableContinuation(ctx context.Context) context.Context {
+	if ctx == nil {
+		return ctx
+	}
+	if openAIHasNonMovableContinuation(ctx) {
+		return ctx
+	}
+	return context.WithValue(ctx, openAINonMovableContinuationContextKey{}, true)
+}
+
+func openAIHasNonMovableContinuation(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	flagged, _ := ctx.Value(openAINonMovableContinuationContextKey{}).(bool)
+	return flagged
+}
+
+// openAIStickyBindingBlockedByRouting 判断一条会话粘性绑定是否应为路由让位。
+//
+// 必须以真正解析出来的绑定账号 ID 调用：部分入口把 stickyAccountID 传 0，由
+// tryStickySessionHit 自己从缓存读出绑定，只看入参会漏掉这些请求。
+func (s *OpenAIGatewayService) openAIStickyBindingBlockedByRouting(ctx context.Context, routedIDs []int64, accountID int64) bool {
+	if accountID <= 0 || len(routedIDs) == 0 {
+		return false
+	}
+	if openAIHasNonMovableContinuation(ctx) {
+		return false
+	}
+	return !openAIRoutingAllowsAccount(routedIDs, accountID)
 }
 
 // openAIRoutingAllowsAccount 判断账号是否落在路由集合内。空集合表示未命中路由，

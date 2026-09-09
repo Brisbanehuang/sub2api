@@ -451,8 +451,7 @@ func (s *defaultOpenAIAccountScheduler) Select(
 	// 普通会话粘性不得压过有效路由：绑定落在路由集合之外时跳过这一层，让候选
 	// 过滤把请求交给路由账号。上面的 previous_response_id 与 guardian parent 层
 	// 是会话正确性约束，不受此限制。
-	stickyBlockedByRouting := req.StickyAccountID > 0 &&
-		!openAIRoutingAllowsAccount(req.RoutedAccountIDs, req.StickyAccountID)
+	stickyBlockedByRouting := s.service.openAIStickyBindingBlockedByRouting(ctx, req.RoutedAccountIDs, req.StickyAccountID)
 	if !req.StickyWeighted && !stickyBlockedByRouting {
 		selection, escapedSticky, err := s.selectBySessionHash(ctx, req)
 		if err != nil {
@@ -1279,7 +1278,7 @@ func (s *defaultOpenAIAccountScheduler) tryFallbackToWeightedSticky(
 		// 分组模型路由：普通会话粘性落在路由集合之外时跳过。previous_response
 		// 绑定是续话约束而非调度偏好，不受此限制（两者同号时按后者处理）。
 		if accountID == req.StickyAccountID && accountID != req.StickyPreviousAccountID &&
-			!openAIRoutingAllowsAccount(req.RoutedAccountIDs, accountID) {
+			s.service.openAIStickyBindingBlockedByRouting(ctx, req.RoutedAccountIDs, accountID) {
 			continue
 		}
 		if req.ExcludedIDs != nil {
@@ -1445,7 +1444,6 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 
 	filterStats := openAISelectionFilterStats{pool: len(accounts)}
 	filtered := make([]*Account, 0, len(accounts))
-	loadReq := make([]AccountWithConcurrency, 0, len(accounts))
 	for i := range accounts {
 		account := &accounts[i]
 		if req.ExcludedIDs != nil {
@@ -1482,26 +1480,46 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 			continue
 		}
 		filtered = append(filtered, account)
-		loadReq = append(loadReq, AccountWithConcurrency{
-			ID:             account.ID,
-			MaxConcurrency: account.EffectiveLoadFactor(),
-		})
 	}
 	if len(filtered) == 0 {
 		return nil, 0, 0, 0, noAvailableOpenAISelectionError(req.RequestedModel, false, filterStats.summary(""))
 	}
 
-	// 分组模型路由：在全部资格门之后收敛候选。路由账号无一通过资格门时留用全量候选，
-	// 保持"优先集合而非硬限定"的语义。
+	// 分组模型路由：先只用路由候选跑一轮完整选择。收敛不能只做一次替换——compact
+	// 过滤、数据库终检和槽位获取都发生在这之后，路由账号在那些环节全军覆没时必须
+	// 回落普通候选，否则健康的备用账号会被一并丢掉、请求直接报无可用账号。
+	//
+	// 槽位占满是另一回事：第一轮会返回等待计划（result 非 nil），那属于"路由账号
+	// 可用但忙"，保持等待以维持账号亲和，与 Anthropic 侧一致，不改判到空闲的非路由
+	// 账号。
 	if routed := openAIRoutedAccountSubset(filtered, req.RoutedAccountIDs); len(routed) > 0 {
-		filtered = routed
-		loadReq = loadReq[:0]
-		for _, account := range filtered {
-			loadReq = append(loadReq, AccountWithConcurrency{
-				ID:             account.ID,
-				MaxConcurrency: account.EffectiveLoadFactor(),
-			})
+		result, candidateCount, topK, loadSkew, err := s.selectByLoadBalanceFromPool(ctx, req, routed, filterStats, budget)
+		if err == nil && result != nil {
+			return result, candidateCount, topK, loadSkew, nil
 		}
+	}
+	return s.selectByLoadBalanceFromPool(ctx, req, filtered, filterStats, budget)
+}
+
+// selectByLoadBalanceFromPool 在给定候选池上完成负载评估、订阅优先分池、槽位获取与
+// 等待计划兜底。抽出来是为了让模型路由可以先在路由池上跑一轮、失败后原样重跑普通池。
+func (s *defaultOpenAIAccountScheduler) selectByLoadBalanceFromPool(
+	ctx context.Context,
+	req OpenAIAccountScheduleRequest,
+	filtered []*Account,
+	filterStats openAISelectionFilterStats,
+	budget *openAISelectionProbeBudget,
+) (*AccountSelectionResult, int, int, float64, error) {
+	if len(filtered) == 0 {
+		return nil, 0, 0, 0, noAvailableOpenAISelectionError(req.RequestedModel, false, filterStats.summary(""))
+	}
+
+	loadReq := make([]AccountWithConcurrency, 0, len(filtered))
+	for _, account := range filtered {
+		loadReq = append(loadReq, AccountWithConcurrency{
+			ID:             account.ID,
+			MaxConcurrency: account.EffectiveLoadFactor(),
+		})
 	}
 
 	loadMap := map[int64]*AccountLoadInfo{}
@@ -2266,6 +2284,11 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	}
 	platform = NormalizeOpenAICompatiblePlatform(platform)
 	ctx = s.WithOpenAIModelRouting(ctx, groupID, platform, requestedModel)
+	// legacy 调度没有独立的续话层，不可迁移的 previous_response 绑定只能靠粘性承载，
+	// 打标让路由的粘性让位规则跳过它。
+	if strings.TrimSpace(previousResponseID) != "" && !previousResponseCanMove {
+		ctx = withOpenAINonMovableContinuation(ctx)
+	}
 	decision := OpenAIAccountScheduleDecision{}
 	preserveGuardianParentBinding := preserveOpenAIGuardianParentBinding(ctx, sessionHash)
 	guardianParentAccountID := int64(0)

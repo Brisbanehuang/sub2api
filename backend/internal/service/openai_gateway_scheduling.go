@@ -889,14 +889,10 @@ func (s *OpenAIGatewayService) selectAccountForModelWithExclusions(ctx context.C
 
 	routedAccountIDs := s.openAIRoutedAccountIDs(ctx, groupID, platform, requestedModel)
 
-	// 1. 尝试粘性会话命中
+	// 1. 尝试粘性会话命中（路由让位判定在 tryStickySessionHit 内部完成）
 	// Try sticky session hit
-	// 普通粘性绑定落在路由集合之外时跳过，让路由账号接管本次选择。
-	stickyBlockedByRouting := stickyAccountID > 0 && !openAIRoutingAllowsAccount(routedAccountIDs, stickyAccountID)
-	if !stickyBlockedByRouting {
-		if account := s.tryStickySessionHit(ctx, groupID, platform, sessionHash, requestedModel, excludedIDs, requireCompact, stickyAccountID, requiredCapability); account != nil {
-			return account, nil
-		}
+	if account := s.tryStickySessionHit(ctx, groupID, platform, sessionHash, requestedModel, excludedIDs, requireCompact, stickyAccountID, requiredCapability); account != nil {
+		return account, nil
 	}
 
 	// 2. 获取可调度的 OpenAI 账号
@@ -961,6 +957,13 @@ func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID 
 	}
 
 	if _, excluded := excludedIDs[accountID]; excluded {
+		return nil
+	}
+
+	// 分组模型路由：普通粘性绑定落在路由集合之外时让位。判定必须放在这里——部分
+	// 入口把 stickyAccountID 传 0，绑定是上面刚从缓存读出来的，在调用方按入参判定
+	// 会整段漏掉。不可迁移的续话绑定由 openAIStickyBindingBlockedByRouting 豁免。
+	if s.openAIStickyBindingBlockedByRouting(ctx, s.openAIRoutedAccountIDs(ctx, groupID, platform, requestedModel), accountID) {
 		return nil
 	}
 
@@ -1198,8 +1201,9 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 	// whole conversation to a cache-cold account.
 	stickySpillover := false
 	routedAccountIDs := s.openAIRoutedAccountIDs(ctx, groupID, platform, requestedModel)
-	// 普通粘性绑定落在路由集合之外时跳过 Layer 1，由 Layer 2 的路由候选接管。
-	stickyBlockedByRouting := stickyAccountID > 0 && !openAIRoutingAllowsAccount(routedAccountIDs, stickyAccountID)
+	// 普通粘性绑定落在路由集合之外时跳过 Layer 1，由 Layer 2 的路由候选接管；
+	// 不可迁移的续话绑定豁免——legacy 没有独立续话层，踢走它会直接让续话失败。
+	stickyBlockedByRouting := s.openAIStickyBindingBlockedByRouting(ctx, routedAccountIDs, stickyAccountID)
 	if sessionHash != "" && !stickyBlockedByRouting {
 		accountID := stickyAccountID
 		if accountID > 0 && !isExcluded(accountID) {
