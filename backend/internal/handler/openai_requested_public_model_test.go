@@ -22,10 +22,10 @@ func newRequestedPublicModelTestContext(t *testing.T) *gin.Context {
 // 返回值必须是同步后的 context。WebSocket 入口持有自己的 ctx 变量并用它选号，
 // 只更新 c.Request 而不回写那个变量，公开别名就进不了调度看到的 context——
 // 配了渠道映射的分组会出现"规则写了却从不命中"。
-func TestRememberOpenAIRequestedPublicModel_ReturnsSyncedContext(t *testing.T) {
+func TestRememberRequestedPublicModel_ReturnsSyncedContext(t *testing.T) {
 	c := newRequestedPublicModelTestContext(t)
 
-	ctx := rememberOpenAIRequestedPublicModel(c, "public-alias")
+	ctx := rememberRequestedPublicModel(c, "public-alias")
 
 	got, ok := service.RequestedPublicModelFromContext(ctx)
 	require.True(t, ok, "返回的 context 必须带上公开别名")
@@ -37,13 +37,13 @@ func TestRememberOpenAIRequestedPublicModel_ReturnsSyncedContext(t *testing.T) {
 }
 
 // composite 中间件先记录过时不覆盖：那已经是解析前的公开名。
-func TestRememberOpenAIRequestedPublicModel_KeepsExistingRecord(t *testing.T) {
+func TestRememberRequestedPublicModel_KeepsExistingRecord(t *testing.T) {
 	c := newRequestedPublicModelTestContext(t)
 	c.Request = c.Request.WithContext(
 		service.WithRequestedPublicModel(c.Request.Context(), "composite-alias"),
 	)
 
-	ctx := rememberOpenAIRequestedPublicModel(c, "channel-mapped-model")
+	ctx := rememberRequestedPublicModel(c, "channel-mapped-model")
 
 	got, ok := service.RequestedPublicModelFromContext(ctx)
 	require.True(t, ok)
@@ -51,10 +51,10 @@ func TestRememberOpenAIRequestedPublicModel_KeepsExistingRecord(t *testing.T) {
 }
 
 // 空模型名不应写入，否则会把查表回落到调度参数的行为改成"匹配空串"。
-func TestRememberOpenAIRequestedPublicModel_IgnoresBlankModel(t *testing.T) {
+func TestRememberRequestedPublicModel_IgnoresBlankModel(t *testing.T) {
 	c := newRequestedPublicModelTestContext(t)
 
-	ctx := rememberOpenAIRequestedPublicModel(c, "   ")
+	ctx := rememberRequestedPublicModel(c, "   ")
 
 	_, ok := service.RequestedPublicModelFromContext(ctx)
 	require.False(t, ok)

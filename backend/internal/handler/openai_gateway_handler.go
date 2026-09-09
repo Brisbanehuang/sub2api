@@ -159,19 +159,20 @@ func openAIWSTurnBillingModel(result *service.OpenAIForwardResult, mapping servi
 // openAIChannelForwardModel returns the model used for upstream capability
 // routing. The client-requested model remains separate for logs, billing, and
 // responses.
-// rememberOpenAIRequestedPublicModel 记录客户端书写的模型名，供调度按公开别名匹配
-// 分组模型路由。渠道映射会把该名字改写成上游模型名，调度参数因此不能作为匹配依据；
-// composite 中间件已写入时保持原值不覆盖。
+// rememberRequestedPublicModel 记录客户端书写的模型名，供调度按公开别名匹配分组模型
+// 路由。各网关入口都会在调度前把模型名改写成上游模型（OpenAI 走渠道映射，Gemini 直接
+// 覆盖 modelName），调度参数因此不能作为匹配依据。
+//
+// composite 中间件在解析前已写入真正的公开名，此时不得覆盖——handler 手里的模型变量
+// 那时已经是解析出的上游模型。
+//
 // 返回同步后的请求 context：调用方若持有自己的 ctx 变量（WebSocket 入口就是这样），
 // 必须用返回值覆盖，否则记录进了 c.Request 却没进选号用的那个 ctx。
-func rememberOpenAIRequestedPublicModel(c *gin.Context, requestedModel string) context.Context {
+func rememberRequestedPublicModel(c *gin.Context, requestedModel string) context.Context {
 	if c == nil || c.Request == nil {
 		return context.Background()
 	}
-	if _, ok := service.RequestedPublicModelFromContext(c.Request.Context()); ok {
-		return c.Request.Context()
-	}
-	ctx := service.WithRequestedPublicModel(c.Request.Context(), requestedModel)
+	ctx := service.WithRequestedPublicModelIfAbsent(c.Request.Context(), requestedModel)
 	if ctx != c.Request.Context() {
 		c.Request = c.Request.WithContext(ctx)
 	}
@@ -580,7 +581,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, reqModel)
 	forwardBody := openAIModelMappedBody(body, channelMapping.Mapped, channelMapping.MappedModel, h.gatewayService.ReplaceModelInBody)
 	seedOpenAIForwardImageIntentHint(c, channelMapping.Mapped, imageIntent)
-	_ = rememberOpenAIRequestedPublicModel(c, reqModel)
+	_ = rememberRequestedPublicModel(c, reqModel)
 	forwardModel := openAIChannelForwardModel(channelMapping, reqModel)
 	c.Request = c.Request.WithContext(service.WithOpenAIForwardModel(
 		c.Request.Context(),
@@ -1214,7 +1215,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		return
 	}
 	bindOpenAIReasoningEffortPolicyForMessagesRequest(c, apiKey, body)
-	_ = rememberOpenAIRequestedPublicModel(c, reqModel)
+	_ = rememberRequestedPublicModel(c, reqModel)
 	routingModel := service.NormalizeOpenAICompatRequestedModel(reqModel)
 	preferredMappedModel := resolveOpenAIMessagesDispatchMappedModel(c, apiKey, reqModel)
 	reqStream := gjson.GetBytes(body, "stream").Bool()
@@ -2461,7 +2462,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 
 	// 解析渠道级模型映射
 	channelMappingWS, _ := h.gatewayService.ResolveChannelMappingAndRestrict(ctx, apiKey.GroupID, reqModel)
-	ctx = rememberOpenAIRequestedPublicModel(c, reqModel)
+	ctx = rememberRequestedPublicModel(c, reqModel)
 	wsForwardModel := openAIChannelForwardModel(channelMappingWS, reqModel)
 
 	var currentUserRelease func()

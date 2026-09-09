@@ -202,6 +202,27 @@ func bindOpenAIRoutingTestSticky(t *testing.T, svc *OpenAIGatewayService, sessio
 	require.Equal(t, accountID, bound, "粘性绑定未真正建立，用例前提不成立")
 }
 
+// forEachOpenAISchedulerAndLoadBatch 遍历四种调度组合。LoadBatchEnabled 决定 legacy
+// 走哪条分支，两条分支各有独立的候选收敛代码，只测一边会漏掉另一边的回退缺陷。
+func forEachOpenAISchedulerAndLoadBatch(t *testing.T, run func(t *testing.T, advanced bool, loadBatch bool)) {
+	t.Helper()
+	for _, advanced := range []bool{false, true} {
+		for _, loadBatch := range []bool{false, true} {
+			name := "legacy_scheduler"
+			if advanced {
+				name = "advanced_scheduler"
+			}
+			if loadBatch {
+				name += "_load_batch"
+			}
+			t.Run(name, func(t *testing.T) {
+				resetOpenAIAdvancedSchedulerSettingCacheForTest()
+				run(t, advanced, loadBatch)
+			})
+		}
+	}
+}
+
 func forEachOpenAIScheduler(t *testing.T, run func(t *testing.T, advanced bool)) {
 	t.Helper()
 	for _, advanced := range []bool{false, true} {
@@ -465,7 +486,7 @@ func TestOpenAIModelRouting_WeightedStickyFallbackRespectsRouting(t *testing.T) 
 // 只把候选池换成路由子集是不够的——路由账号在这些环节全军覆没时，健康的备用账号
 // 会被一并丢掉，请求直接报无可用账号。
 func TestOpenAIModelRouting_FallsBackWhenRoutedAccountFailsLateGate(t *testing.T) {
-	forEachOpenAIScheduler(t, func(t *testing.T, advanced bool) {
+	forEachOpenAISchedulerAndLoadBatch(t, func(t *testing.T, advanced bool, loadBatch bool) {
 		accounts := openAIRoutingTestAccounts()
 		// 路由账号明确不支持 compact，备用账号支持。compact 过滤发生在候选收敛之后。
 		accounts[0].Extra["openai_compact_supported"] = false
@@ -477,6 +498,7 @@ func TestOpenAIModelRouting_FallsBackWhenRoutedAccountFailsLateGate(t *testing.T
 			}),
 			advanced,
 		)
+		svc.cfg.Gateway.Scheduling.LoadBatchEnabled = loadBatch
 		groupID := openAIRoutingTestGroupID
 		selection, _, err := svc.SelectAccountWithSchedulerForCapability(
 			context.Background(),
@@ -557,7 +579,7 @@ func TestOpenAIModelRouting_StickyBypassEntryStillRespectsRouting(t *testing.T) 
 
 // 批量负载路径（LoadBatchEnabled）是另一条独立分支，此前用例统一关掉了它。
 func TestOpenAIModelRouting_LoadBatchPathHonorsRouting(t *testing.T) {
-	forEachOpenAIScheduler(t, func(t *testing.T, advanced bool) {
+	forEachOpenAISchedulerAndLoadBatch(t, func(t *testing.T, advanced bool, loadBatch bool) {
 		svc := newOpenAIModelRoutingTestService(
 			openAIRoutingTestAccounts(),
 			openAIRoutingTestGroup(true, map[string][]int64{
@@ -565,7 +587,7 @@ func TestOpenAIModelRouting_LoadBatchPathHonorsRouting(t *testing.T) {
 			}),
 			advanced,
 		)
-		svc.cfg.Gateway.Scheduling.LoadBatchEnabled = true
+		svc.cfg.Gateway.Scheduling.LoadBatchEnabled = loadBatch
 
 		selection, err := selectOpenAIRoutingTestAccount(t, svc, context.Background(),
 			openAIRoutingStableSession, openAIRoutingTestModel, nil)
@@ -617,4 +639,30 @@ func TestModelRoutingLookupModel(t *testing.T) {
 	require.Equal(t, "mapped-model",
 		modelRoutingLookupModel(context.Background(), "mapped-model"))
 	require.Equal(t, "", modelRoutingLookupModel(context.Background(), "   "))
+}
+
+// composite 中间件在解析前记录了真正的公开名，之后各网关 handler 手里的模型变量
+// 已经是解析出的上游模型。补写必须让位于已有值，否则 composite 的公开名被冲掉，
+// 规则反而漏配。
+func TestWithRequestedPublicModelIfAbsent(t *testing.T) {
+	t.Run("keeps the value composite already recorded", func(t *testing.T) {
+		ctx := WithRequestedPublicModel(context.Background(), "composite-public-alias")
+		got, ok := RequestedPublicModelFromContext(
+			WithRequestedPublicModelIfAbsent(ctx, "resolved-upstream-model"))
+		require.True(t, ok)
+		require.Equal(t, "composite-public-alias", got)
+	})
+
+	t.Run("fills in when nothing was recorded", func(t *testing.T) {
+		got, ok := RequestedPublicModelFromContext(
+			WithRequestedPublicModelIfAbsent(context.Background(), "public-alias"))
+		require.True(t, ok)
+		require.Equal(t, "public-alias", got)
+	})
+
+	t.Run("ignores a blank model", func(t *testing.T) {
+		_, ok := RequestedPublicModelFromContext(
+			WithRequestedPublicModelIfAbsent(context.Background(), "  "))
+		require.False(t, ok)
+	})
 }

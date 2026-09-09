@@ -295,8 +295,9 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, modelName)
 	reqModel := modelName // 保存映射前的原始模型名
 	// 分组模型路由按客户端书写的模型名匹配，而调度收到的是下面被覆盖过的 modelName。
-	// composite 已由中间件记录，这里只补普通 gemini/antigravity 分组。
-	c.Request = c.Request.WithContext(service.WithRequestedPublicModel(c.Request.Context(), reqModel))
+	// composite 分组走到这里时 modelName 已经是解析出的上游模型，共用的记录函数会
+	// 保留中间件先写入的真正公开名，不做覆盖。
+	_ = rememberRequestedPublicModel(c, reqModel)
 	if channelMapping.Mapped {
 		modelName = channelMapping.MappedModel
 	}
