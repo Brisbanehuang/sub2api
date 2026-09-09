@@ -159,6 +159,22 @@ func openAIWSTurnBillingModel(result *service.OpenAIForwardResult, mapping servi
 // openAIChannelForwardModel returns the model used for upstream capability
 // routing. The client-requested model remains separate for logs, billing, and
 // responses.
+// rememberOpenAIRequestedPublicModel 记录客户端书写的模型名，供调度按公开别名匹配
+// 分组模型路由。渠道映射会把该名字改写成上游模型名，调度参数因此不能作为匹配依据；
+// composite 中间件已写入时保持原值不覆盖。
+func rememberOpenAIRequestedPublicModel(c *gin.Context, requestedModel string) {
+	if c == nil || c.Request == nil {
+		return
+	}
+	if _, ok := service.RequestedPublicModelFromContext(c.Request.Context()); ok {
+		return
+	}
+	ctx := service.WithRequestedPublicModel(c.Request.Context(), requestedModel)
+	if ctx != c.Request.Context() {
+		c.Request = c.Request.WithContext(ctx)
+	}
+}
+
 func openAIChannelForwardModel(mapping service.ChannelMappingResult, requestedModel string) string {
 	if mapping.Mapped {
 		if mappedModel := strings.TrimSpace(mapping.MappedModel); mappedModel != "" {
@@ -561,6 +577,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, reqModel)
 	forwardBody := openAIModelMappedBody(body, channelMapping.Mapped, channelMapping.MappedModel, h.gatewayService.ReplaceModelInBody)
 	seedOpenAIForwardImageIntentHint(c, channelMapping.Mapped, imageIntent)
+	rememberOpenAIRequestedPublicModel(c, reqModel)
 	forwardModel := openAIChannelForwardModel(channelMapping, reqModel)
 	c.Request = c.Request.WithContext(service.WithOpenAIForwardModel(
 		c.Request.Context(),
@@ -1194,6 +1211,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		return
 	}
 	bindOpenAIReasoningEffortPolicyForMessagesRequest(c, apiKey, body)
+	rememberOpenAIRequestedPublicModel(c, reqModel)
 	routingModel := service.NormalizeOpenAICompatRequestedModel(reqModel)
 	preferredMappedModel := resolveOpenAIMessagesDispatchMappedModel(c, apiKey, reqModel)
 	reqStream := gjson.GetBytes(body, "stream").Bool()
@@ -2440,6 +2458,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 
 	// 解析渠道级模型映射
 	channelMappingWS, _ := h.gatewayService.ResolveChannelMappingAndRestrict(ctx, apiKey.GroupID, reqModel)
+	rememberOpenAIRequestedPublicModel(c, reqModel)
 	wsForwardModel := openAIChannelForwardModel(channelMappingWS, reqModel)
 
 	var currentUserRelease func()

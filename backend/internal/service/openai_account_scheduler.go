@@ -89,6 +89,9 @@ type OpenAIAccountScheduleRequest struct {
 	// and compact_model_mapping; native remote compaction v2 leaves it false.
 	RequireCompact bool
 	ExcludedIDs    map[int64]struct{}
+	// RoutedAccountIDs 是分组模型路由为本次模型命中的优先账号集合（可为空）。
+	// 它只在候选与普通粘性层表达偏好，不放宽任何资格门，见 openai_model_routing.go。
+	RoutedAccountIDs []int64
 }
 
 type OpenAIAccountScheduleDecision struct {
@@ -445,7 +448,12 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		}
 	}
 
-	if !req.StickyWeighted {
+	// 普通会话粘性不得压过有效路由：绑定落在路由集合之外时跳过这一层，让候选
+	// 过滤把请求交给路由账号。上面的 previous_response_id 与 guardian parent 层
+	// 是会话正确性约束，不受此限制。
+	stickyBlockedByRouting := req.StickyAccountID > 0 &&
+		!openAIRoutingAllowsAccount(req.RoutedAccountIDs, req.StickyAccountID)
+	if !req.StickyWeighted && !stickyBlockedByRouting {
 		selection, escapedSticky, err := s.selectBySessionHash(ctx, req)
 		if err != nil {
 			return nil, decision, err
@@ -1267,6 +1275,13 @@ func (s *defaultOpenAIAccountScheduler) tryFallbackToWeightedSticky(
 		if accountID <= 0 {
 			continue
 		}
+		// 这条兜底直接按绑定取账号，绕开了负载均衡的候选过滤，因此必须自行遵守
+		// 分组模型路由：普通会话粘性落在路由集合之外时跳过。previous_response
+		// 绑定是续话约束而非调度偏好，不受此限制（两者同号时按后者处理）。
+		if accountID == req.StickyAccountID && accountID != req.StickyPreviousAccountID &&
+			!openAIRoutingAllowsAccount(req.RoutedAccountIDs, accountID) {
+			continue
+		}
 		if req.ExcludedIDs != nil {
 			if _, excluded := req.ExcludedIDs[accountID]; excluded {
 				continue
@@ -1474,6 +1489,19 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 	}
 	if len(filtered) == 0 {
 		return nil, 0, 0, 0, noAvailableOpenAISelectionError(req.RequestedModel, false, filterStats.summary(""))
+	}
+
+	// 分组模型路由：在全部资格门之后收敛候选。路由账号无一通过资格门时留用全量候选，
+	// 保持"优先集合而非硬限定"的语义。
+	if routed := openAIRoutedAccountSubset(filtered, req.RoutedAccountIDs); len(routed) > 0 {
+		filtered = routed
+		loadReq = loadReq[:0]
+		for _, account := range filtered {
+			loadReq = append(loadReq, AccountWithConcurrency{
+				ID:             account.ID,
+				MaxConcurrency: account.EffectiveLoadFactor(),
+			})
+		}
 	}
 
 	loadMap := map[int64]*AccountLoadInfo{}
@@ -2237,6 +2265,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 		ctx = s.withOpenAIProfitControlGate(ctx, groupID)
 	}
 	platform = NormalizeOpenAICompatiblePlatform(platform)
+	ctx = s.WithOpenAIModelRouting(ctx, groupID, platform, requestedModel)
 	decision := OpenAIAccountScheduleDecision{}
 	preserveGuardianParentBinding := preserveOpenAIGuardianParentBinding(ctx, sessionHash)
 	guardianParentAccountID := int64(0)
@@ -2372,6 +2401,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 		RequiredImageCapability: requiredImageCapability,
 		RequireCompact:          requireCompact,
 		ExcludedIDs:             excludedIDs,
+		RoutedAccountIDs:        s.openAIRoutedAccountIDs(ctx, groupID, platform, requestedModel),
 	})
 }
 

@@ -60,6 +60,22 @@ func ResolvedUpstreamModelFromContext(ctx context.Context) (string, bool) {
 	return model, true
 }
 
+// WithRequestedPublicModel 记录客户端原始请求中的公开模型名。
+//
+// composite 请求由 WithCompositeRouteDecision 一并写入；非 composite 请求需要网关
+// handler 在做渠道映射之前显式记录，否则调度只能看到映射后的上游模型名，按公开别名
+// 配置的分组模型路由就会漏配（见 openai_model_routing.go 的匹配阶段说明）。
+func WithRequestedPublicModel(ctx context.Context, model string) context.Context {
+	if ctx == nil {
+		return ctx
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, ctxkey.RequestedPublicModel, model)
+}
+
 func RequestedPublicModelFromContext(ctx context.Context) (string, bool) {
 	if ctx == nil {
 		return "", false

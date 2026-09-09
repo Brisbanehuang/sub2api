@@ -332,14 +332,119 @@ func TestOpenAIModelRouting_MatchesPublicAliasNotChannelMappedModel(t *testing.T
 			Matched:        true,
 			PublicModel:    openAIRoutingTestModel,
 			TargetPlatform: PlatformOpenAI,
-			UpstreamModel:  "gpt-5.1-channel-mapped",
+			UpstreamModel:  "gpt-5.1-upstream",
 		})
-		requireBaselinePicksPreferred(t, advanced, "gpt-5.1-channel-mapped", nil)
-		selection, err := selectOpenAIRoutingTestAccount(t, svc, ctx, openAIRoutingStableSession, "gpt-5.1-channel-mapped", nil)
+		requireBaselinePicksPreferred(t, advanced, "gpt-5.1-upstream", nil)
+		selection, err := selectOpenAIRoutingTestAccount(t, svc, ctx, openAIRoutingStableSession, "gpt-5.1-upstream", nil)
 		require.NoError(t, err)
 		require.NotNil(t, selection)
 		require.NotNil(t, selection.Account)
 		require.Equal(t, openAIRoutingTestRoutedID, selection.Account.ID,
 			"路由规则必须按公开别名匹配，而不是渠道映射后的模型名")
+	})
+}
+
+// 非 composite 请求同样按公开别名匹配：OpenAI 系 handler 在做渠道映射之前用
+// WithRequestedPublicModel 记录客户端书写的模型名，调度收到的则是映射后的上游
+// 模型名。少了这一步，配了渠道映射的分组会出现"规则写了却从不命中"。
+func TestOpenAIModelRouting_MatchesPublicAliasFromPlainChannelMapping(t *testing.T) {
+	forEachOpenAIScheduler(t, func(t *testing.T, advanced bool) {
+		svc := newOpenAIModelRoutingTestService(
+			openAIRoutingTestAccounts(),
+			openAIRoutingTestGroup(true, map[string][]int64{
+				openAIRoutingTestModel: {openAIRoutingTestRoutedID},
+			}),
+			advanced,
+		)
+		requireBaselinePicksPreferred(t, advanced, "gpt-5.1-upstream", nil)
+		ctx := WithRequestedPublicModel(context.Background(), openAIRoutingTestModel)
+		selection, err := selectOpenAIRoutingTestAccount(t, svc, ctx, openAIRoutingStableSession, "gpt-5.1-upstream", nil)
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.NotNil(t, selection.Account)
+		require.Equal(t, openAIRoutingTestRoutedID, selection.Account.ID,
+			"渠道映射前记录的公开别名必须作为路由匹配依据")
+	})
+}
+
+// StickyWeighted 模式下普通粘性不再走 selectBySessionHash，而是由加权顺序把绑定
+// 账号提到候选队首。候选池本身已按路由收敛，绑定账号落在集合外时自然排不进来。
+// 该模式下绕开候选过滤的兜底路径由 WeightedStickyFallbackRespectsRouting 单独覆盖。
+func TestOpenAIModelRouting_RoutedAccountBeatsWeightedSticky(t *testing.T) {
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	svc := newOpenAIModelRoutingTestService(
+		openAIRoutingTestAccounts(),
+		openAIRoutingTestGroup(true, map[string][]int64{
+			openAIRoutingTestModel: {openAIRoutingTestRoutedID},
+		}),
+		true,
+	)
+	svc.rateLimitService = newOpenAIAdvancedSchedulerRateLimitService("true", "true")
+
+	cache := svc.cache.(*schedulerTestGatewayCache)
+	require.NoError(t, cache.SetSessionAccountID(context.Background(), openAIRoutingTestGroupID,
+		openAIRoutingStableSession, openAIRoutingTestPreferredID, 0))
+
+	selection, err := selectOpenAIRoutingTestAccount(t, svc, context.Background(),
+		openAIRoutingStableSession, openAIRoutingTestModel, nil)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.NotNil(t, selection.Account)
+	require.Equal(t, openAIRoutingTestRoutedID, selection.Account.ID,
+		"加权粘性模式下路由同样不得被普通粘性压过")
+}
+
+// tryFallbackToWeightedSticky 是负载均衡把候选全部试完仍未拿到槽位后的兜底：它直接
+// 按绑定取账号，绕开候选过滤，因此必须自行遵守路由。这里直接驱动该函数，因为经完整
+// 调度很难稳定构造"候选全部占满"的前置条件。
+func TestOpenAIModelRouting_WeightedStickyFallbackRespectsRouting(t *testing.T) {
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	svc := newOpenAIModelRoutingTestService(
+		openAIRoutingTestAccounts(),
+		openAIRoutingTestGroup(true, map[string][]int64{
+			openAIRoutingTestModel: {openAIRoutingTestRoutedID},
+		}),
+		true,
+	)
+	scheduler := &defaultOpenAIAccountScheduler{service: svc, stats: newOpenAIAccountRuntimeStats()}
+	groupID := openAIRoutingTestGroupID
+	baseReq := OpenAIAccountScheduleRequest{
+		GroupID:            &groupID,
+		Platform:           PlatformOpenAI,
+		SessionHash:        openAIRoutingStableSession,
+		StickyWeighted:     true,
+		RequestedModel:     openAIRoutingTestModel,
+		RequiredTransport:  OpenAIUpstreamTransportAny,
+		RequiredCapability: OpenAIEndpointCapabilityResponses,
+		RoutedAccountIDs:   []int64{openAIRoutingTestRoutedID},
+	}
+
+	t.Run("plain sticky outside the routed set is skipped", func(t *testing.T) {
+		req := baseReq
+		req.StickyAccountID = openAIRoutingTestPreferredID
+		selection, err := scheduler.tryFallbackToWeightedSticky(context.Background(), req)
+		require.NoError(t, err)
+		require.Nil(t, selection, "普通粘性落在路由集合之外时不得由兜底选中")
+	})
+
+	t.Run("previous_response binding stays exempt", func(t *testing.T) {
+		req := baseReq
+		req.StickyPreviousAccountID = openAIRoutingTestPreferredID
+		selection, err := scheduler.tryFallbackToWeightedSticky(context.Background(), req)
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.NotNil(t, selection.Account)
+		require.Equal(t, openAIRoutingTestPreferredID, selection.Account.ID,
+			"previous_response 绑定是续话约束，不受路由限制")
+	})
+
+	t.Run("sticky inside the routed set is still honoured", func(t *testing.T) {
+		req := baseReq
+		req.StickyAccountID = openAIRoutingTestRoutedID
+		selection, err := scheduler.tryFallbackToWeightedSticky(context.Background(), req)
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.NotNil(t, selection.Account)
+		require.Equal(t, openAIRoutingTestRoutedID, selection.Account.ID)
 	})
 }

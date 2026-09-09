@@ -887,10 +887,16 @@ func (s *OpenAIGatewayService) selectAccountForModelWithExclusions(ctx context.C
 		return nil, fmt.Errorf("%w supporting model: %s (channel pricing restriction)", ErrNoAvailableAccounts, requestedModel)
 	}
 
+	routedAccountIDs := s.openAIRoutedAccountIDs(ctx, groupID, platform, requestedModel)
+
 	// 1. 尝试粘性会话命中
 	// Try sticky session hit
-	if account := s.tryStickySessionHit(ctx, groupID, platform, sessionHash, requestedModel, excludedIDs, requireCompact, stickyAccountID, requiredCapability); account != nil {
-		return account, nil
+	// 普通粘性绑定落在路由集合之外时跳过，让路由账号接管本次选择。
+	stickyBlockedByRouting := stickyAccountID > 0 && !openAIRoutingAllowsAccount(routedAccountIDs, stickyAccountID)
+	if !stickyBlockedByRouting {
+		if account := s.tryStickySessionHit(ctx, groupID, platform, sessionHash, requestedModel, excludedIDs, requireCompact, stickyAccountID, requiredCapability); account != nil {
+			return account, nil
+		}
 	}
 
 	// 2. 获取可调度的 OpenAI 账号
@@ -902,7 +908,18 @@ func (s *OpenAIGatewayService) selectAccountForModelWithExclusions(ctx context.C
 
 	// 3. 按优先级 + LRU 选择最佳账号
 	// Select by priority + LRU
-	selected, compactBlocked, filterStats := s.selectBestAccount(ctx, groupID, platform, accounts, requestedModel, excludedIDs, requireCompact, requiredCapability, preferLowUpstreamRate)
+	// 分组模型路由：先只在路由账号中选；它们全部无法通过资格门时回落全量候选。
+	var (
+		selected       *Account
+		compactBlocked bool
+		filterStats    openAISelectionFilterStats
+	)
+	if routed := openAIRoutedAccountValueSubset(accounts, routedAccountIDs); len(routed) > 0 {
+		selected, compactBlocked, filterStats = s.selectBestAccount(ctx, groupID, platform, routed, requestedModel, excludedIDs, requireCompact, requiredCapability, preferLowUpstreamRate)
+	}
+	if selected == nil {
+		selected, compactBlocked, filterStats = s.selectBestAccount(ctx, groupID, platform, accounts, requestedModel, excludedIDs, requireCompact, requiredCapability, preferLowUpstreamRate)
+	}
 
 	if selected == nil {
 		return nil, noAvailableOpenAISelectionError(requestedModel, compactBlocked, filterStats.summary(""))
@@ -1108,6 +1125,7 @@ func (s *OpenAIGatewayService) SelectAccountWithLoadAwareness(ctx context.Contex
 	// 分组利润控制：legacy 公共入口同样装门，保证不经
 	// selectAccountWithScheduler 的调用方也无法绕过利润准入。
 	ctx = s.withOpenAIProfitControlGate(ctx, groupID)
+	ctx = s.WithOpenAIModelRouting(ctx, groupID, PlatformOpenAI, requestedModel)
 	return s.selectAccountWithLoadAwareness(ctx, groupID, PlatformOpenAI, sessionHash, requestedModel, excludedIDs, false, "", true)
 }
 
@@ -1179,7 +1197,10 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 	// rewriting the durable binding here would make a short burst migrate the
 	// whole conversation to a cache-cold account.
 	stickySpillover := false
-	if sessionHash != "" {
+	routedAccountIDs := s.openAIRoutedAccountIDs(ctx, groupID, platform, requestedModel)
+	// 普通粘性绑定落在路由集合之外时跳过 Layer 1，由 Layer 2 的路由候选接管。
+	stickyBlockedByRouting := stickyAccountID > 0 && !openAIRoutingAllowsAccount(routedAccountIDs, stickyAccountID)
+	if sessionHash != "" && !stickyBlockedByRouting {
 		accountID := stickyAccountID
 		if accountID > 0 && !isExcluded(accountID) {
 			account, err := s.getSchedulableAccount(ctx, accountID)
@@ -1276,6 +1297,11 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 
 	if len(candidates) == 0 {
 		return nil, noAvailableOpenAISelectionError(requestedModel, false, filterStats.summary(""))
+	}
+	// 分组模型路由：在全部资格门之后收敛候选，路由账号无一可用时留用全量候选。
+	if routed := openAIRoutedAccountSubset(candidates, routedAccountIDs); len(routed) > 0 {
+		candidates = routed
+		baseCandidateCount = len(routed)
 	}
 	rateOrder := openAILegacyUpstreamRateOrder{}
 	if preferLowUpstreamRate {
