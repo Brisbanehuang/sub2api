@@ -1493,12 +1493,12 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 	// 可用但忙"，保持等待以维持账号亲和，与 Anthropic 侧一致，不改判到空闲的非路由
 	// 账号。
 	if routed := openAIRoutedAccountSubset(filtered, req.RoutedAccountIDs); len(routed) > 0 {
-		result, candidateCount, topK, loadSkew, err := s.selectByLoadBalanceFromPool(ctx, req, routed, filterStats, budget)
+		result, candidateCount, topK, loadSkew, err := s.selectByLoadBalanceFromPool(ctx, req, routed, filterStats, budget, true)
 		if err == nil && result != nil {
 			return result, candidateCount, topK, loadSkew, nil
 		}
 	}
-	return s.selectByLoadBalanceFromPool(ctx, req, filtered, filterStats, budget)
+	return s.selectByLoadBalanceFromPool(ctx, req, filtered, filterStats, budget, false)
 }
 
 // selectByLoadBalanceFromPool 在给定候选池上完成负载评估、订阅优先分池、槽位获取与
@@ -1509,6 +1509,7 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalanceFromPool(
 	filtered []*Account,
 	filterStats openAISelectionFilterStats,
 	budget *openAISelectionProbeBudget,
+	routedRound bool,
 ) (*AccountSelectionResult, int, int, float64, error) {
 	if len(filtered) == 0 {
 		return nil, 0, 0, 0, noAvailableOpenAISelectionError(req.RequestedModel, false, filterStats.summary(""))
@@ -1527,6 +1528,12 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalanceFromPool(
 		if batchLoad, loadErr := s.service.concurrencyService.GetAccountsLoadBatch(ctx, loadReq); loadErr == nil {
 			loadMap = batchLoad
 		}
+	}
+
+	// 路由优先轮遇上"路由账号全部占满"时让位给普通候选：继续走下去只会返回一个等待
+	// 计划，把请求排在满载账号后面，而空闲的备用账号就在旁边。
+	if routedRound && openAIAllAccountsAtCapacity(filtered, loadMap) {
+		return nil, 0, 0, 0, noAvailableOpenAISelectionError(req.RequestedModel, false, filterStats.summary("routed_accounts_at_capacity"))
 	}
 
 	if req.SubscriptionPriority {

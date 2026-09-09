@@ -44,6 +44,15 @@ func (r openAIRoutingTestGroupRepo) GetByIDLite(ctx context.Context, id int64) (
 // newOpenAIModelRoutingTestService 构造一个带分组快照的 OpenAI 调度服务。
 // advanced=true 走 OpenAIAccountScheduler.Select，false 走 legacy 负载感知路径。
 func newOpenAIModelRoutingTestService(accounts []Account, group *Group, advanced bool) *OpenAIGatewayService {
+	return newOpenAIModelRoutingTestServiceWithConcurrency(accounts, group, advanced, schedulerTestConcurrencyCache{})
+}
+
+func newOpenAIModelRoutingTestServiceWithConcurrency(
+	accounts []Account,
+	group *Group,
+	advanced bool,
+	concurrencyCache schedulerTestConcurrencyCache,
+) *OpenAIGatewayService {
 	cfg := &config.Config{}
 	cfg.Gateway.Scheduling.LoadBatchEnabled = false
 	snapshotAccounts := make([]*Account, 0, len(accounts))
@@ -56,7 +65,7 @@ func newOpenAIModelRoutingTestService(accounts []Account, group *Group, advanced
 		accountRepo:        schedulerTestOpenAIAccountRepo{accounts: accounts},
 		cache:              &schedulerTestGatewayCache{},
 		cfg:                cfg,
-		concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{}),
+		concurrencyService: NewConcurrencyService(concurrencyCache),
 		// 账号走快照（与生产一致），分组走 groupRepo。
 		schedulerSnapshot: &SchedulerSnapshotService{
 			cache: &openAISnapshotCacheStub{
@@ -664,5 +673,84 @@ func TestWithRequestedPublicModelIfAbsent(t *testing.T) {
 		_, ok := RequestedPublicModelFromContext(
 			WithRequestedPublicModelIfAbsent(context.Background(), "  "))
 		require.False(t, ok)
+	})
+}
+
+// 路由账号已知满载——负载读数到顶且抢不到槽位——时必须回落到空闲的备用账号，而不是
+// 让请求排队等它。Anthropic 侧在同样条件下就是回落（负载率 100% 且路由内无粘性命中）；
+// 只有"负载读数未满、抢槽却失败"才返回等待计划以保持账号亲和。
+//
+// 只覆盖会读取负载的调度路径。legacy 的非批量分支（LoadBatchEnabled=false）从不查
+// 负载读数，对任何账号都是"选中→抢不到→等待"，不区分满载与并发竞争；在那里按满载
+// 换账号等于改掉该分支对所有账号的等待语义，属于另一件事。
+func TestOpenAIModelRouting_FallsBackWhenRoutedAccountIsAtCapacity(t *testing.T) {
+	forEachOpenAISchedulerAndLoadBatch(t, func(t *testing.T, advanced bool, loadBatch bool) {
+		if !advanced && !loadBatch {
+			t.Skip("legacy 非批量分支不读负载读数，无从判断满载")
+		}
+		concurrency := schedulerTestConcurrencyCache{
+			loadMap: map[int64]*AccountLoadInfo{
+				openAIRoutingTestRoutedID:    {AccountID: openAIRoutingTestRoutedID, LoadRate: 100},
+				openAIRoutingTestPreferredID: {AccountID: openAIRoutingTestPreferredID, LoadRate: 0},
+			},
+			acquireResults: map[int64]bool{
+				openAIRoutingTestRoutedID:    false,
+				openAIRoutingTestPreferredID: true,
+			},
+		}
+		svc := newOpenAIModelRoutingTestServiceWithConcurrency(
+			openAIRoutingTestAccounts(),
+			openAIRoutingTestGroup(true, map[string][]int64{
+				openAIRoutingTestModel: {openAIRoutingTestRoutedID},
+			}),
+			advanced,
+			concurrency,
+		)
+		svc.cfg.Gateway.Scheduling.LoadBatchEnabled = loadBatch
+
+		selection, err := selectOpenAIRoutingTestAccount(t, svc, context.Background(),
+			openAIRoutingStableSession, openAIRoutingTestModel, nil)
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.NotNil(t, selection.Account)
+		require.Equal(t, openAIRoutingTestPreferredID, selection.Account.ID,
+			"路由账号满载时应改用空闲的备用账号，而不是排队等它")
+		require.True(t, selection.Acquired, "回落到空闲账号应当直接拿到槽位，而不是返回等待计划")
+	})
+}
+
+// 对照用例：负载读数未满、只是这一瞬抢槽失败时，仍应返回指向路由账号的等待计划。
+// 满载回落不能退化成"抢不到就换账号"，那会让路由失去账号亲和的意义。
+func TestOpenAIModelRouting_WaitsWhenRoutedAccountIsBusyButNotAtCapacity(t *testing.T) {
+	forEachOpenAISchedulerAndLoadBatch(t, func(t *testing.T, advanced bool, loadBatch bool) {
+		concurrency := schedulerTestConcurrencyCache{
+			loadMap: map[int64]*AccountLoadInfo{
+				openAIRoutingTestRoutedID:    {AccountID: openAIRoutingTestRoutedID, LoadRate: 40},
+				openAIRoutingTestPreferredID: {AccountID: openAIRoutingTestPreferredID, LoadRate: 0},
+			},
+			acquireResults: map[int64]bool{
+				openAIRoutingTestRoutedID:    false,
+				openAIRoutingTestPreferredID: true,
+			},
+		}
+		svc := newOpenAIModelRoutingTestServiceWithConcurrency(
+			openAIRoutingTestAccounts(),
+			openAIRoutingTestGroup(true, map[string][]int64{
+				openAIRoutingTestModel: {openAIRoutingTestRoutedID},
+			}),
+			advanced,
+			concurrency,
+		)
+		svc.cfg.Gateway.Scheduling.LoadBatchEnabled = loadBatch
+
+		selection, err := selectOpenAIRoutingTestAccount(t, svc, context.Background(),
+			openAIRoutingStableSession, openAIRoutingTestModel, nil)
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.NotNil(t, selection.Account)
+		require.Equal(t, openAIRoutingTestRoutedID, selection.Account.ID,
+			"负载未满时抢槽失败应继续等待路由账号，而不是改用别的账号")
+		require.False(t, selection.Acquired)
+		require.NotNil(t, selection.WaitPlan, "应返回指向路由账号的等待计划")
 	})
 }

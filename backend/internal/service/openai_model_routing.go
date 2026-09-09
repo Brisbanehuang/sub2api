@@ -156,6 +156,30 @@ func openAIRoutingAllowsAccount(routedIDs []int64, accountID int64) bool {
 	return false
 }
 
+// openAIAllAccountsAtCapacity 判断一组候选是否全部已知满载。
+//
+// 用于路由优先轮：路由账号确实占满时应把请求让给空闲的备用账号，而不是排队等它，
+// 这也是 Anthropic 侧在同样条件下的行为。"负载读数未满、只是抢槽失败"不属于此列，
+// 那种情况仍返回等待计划以保持账号亲和。
+//
+// 读数缺失（并发服务不可用或批量查询失败）时返回 false：无从判断就不抑制等待，
+// 保持既有行为，不因为一次读数失败把请求推到别的账号上。
+func openAIAllAccountsAtCapacity(accounts []*Account, loadMap map[int64]*AccountLoadInfo) bool {
+	if len(accounts) == 0 || len(loadMap) == 0 {
+		return false
+	}
+	for _, account := range accounts {
+		if account == nil {
+			return false
+		}
+		info, ok := loadMap[account.ID]
+		if !ok || info == nil || info.LoadRate < 100 {
+			return false
+		}
+	}
+	return true
+}
+
 // openAIRoutedAccountSubset 返回候选中落在路由集合内的子集（保持原有顺序）。
 // 返回空表示没有可用的路由账号，调用方据此回落普通调度。
 func openAIRoutedAccountSubset(accounts []*Account, routedIDs []int64) []*Account {

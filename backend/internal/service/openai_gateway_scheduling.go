@@ -1310,7 +1310,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 	// 两种"忙"要分开看，这也是 Anthropic 侧的既有行为：负载读数未满但抢槽失败时本轮
 	// 返回等待计划（result 非 nil）并被采纳，保持账号亲和；负载已达上限则本轮返回错误，
 	// 走回落。
-	runCandidateSelection := func(candidates []*Account, baseCandidateCount int) (*AccountSelectionResult, error) {
+	runCandidateSelection := func(candidates []*Account, baseCandidateCount int, routedRound bool) (*AccountSelectionResult, error) {
 		rateOrder := openAILegacyUpstreamRateOrder{}
 		if preferLowUpstreamRate {
 			rateOrder = newOpenAILegacyUpstreamRateOrder(candidates, time.Now(), s.openAIOAuthSchedulingRateMultiplier(ctx))
@@ -1452,6 +1452,11 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 				}
 			}
 		} else {
+			// 路由优先轮遇上"路由账号全部占满"时让位给普通候选：继续走下去只会返回
+			// 一个等待计划，把请求排在满载账号后面，而空闲的备用账号就在旁边。
+			if routedRound && openAIAllAccountsAtCapacity(candidates, loadMap) {
+				return nil, ErrNoAvailableAccounts
+			}
 			if selection, attempted, selectErr := tryAcquireFromLoadMap(loadMap); selectErr != nil {
 				return nil, selectErr
 			} else if selection != nil {
@@ -1504,11 +1509,11 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 	}
 
 	if routed := openAIRoutedAccountSubset(candidates, routedAccountIDs); len(routed) > 0 {
-		if selection, routedErr := runCandidateSelection(routed, len(routed)); routedErr == nil && selection != nil {
+		if selection, routedErr := runCandidateSelection(routed, len(routed), true); routedErr == nil && selection != nil {
 			return selection, nil
 		}
 	}
-	return runCandidateSelection(candidates, baseCandidateCount)
+	return runCandidateSelection(candidates, baseCandidateCount, false)
 }
 
 func (s *OpenAIGatewayService) listSchedulableAccounts(ctx context.Context, groupID *int64, platform string) ([]Account, error) {
