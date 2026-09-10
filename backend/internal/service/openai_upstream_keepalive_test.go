@@ -18,7 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const openAIUpstreamKeepaliveFixture = "data: {\"type\":\"keepalive\"}\n\n"
+const openAIUpstreamKeepaliveFixture = "data: {\"type\":\"keepalive\",\"sequence_number\":1}\n\n"
 
 func TestOpenAIUnrecognizedKeepaliveDiagnostics(t *testing.T) {
 	for _, passthrough := range []bool{false, true} {
@@ -86,6 +86,15 @@ func TestOpenAIUpstreamKeepaliveOutputClassification(t *testing.T) {
 		{"typed heartbeat", `{"type":"keepalive"}`, "keepalive", false},
 		{"data-only heartbeat", `{"type":"keepalive"}`, "", false},
 		{"named heartbeat", `{}`, "keepalive", false},
+		{"sequenced heartbeat", `{"type":"keepalive","sequence_number":1}`, "keepalive", false},
+		{"data-only sequenced heartbeat", `{"sequence_number":0,"type":"keepalive"}`, "", false},
+		{"named sequenced heartbeat", `{"sequence_number":2}`, "keepalive", false},
+		{"sequence is not an event type", `{"sequence_number":1}`, "", true},
+		{"string sequence", `{"type":"keepalive","sequence_number":"1"}`, "keepalive", true},
+		{"negative sequence", `{"type":"keepalive","sequence_number":-1}`, "keepalive", true},
+		{"fractional sequence", `{"type":"keepalive","sequence_number":1.5}`, "keepalive", true},
+		{"sequence with content", `{"type":"keepalive","sequence_number":1,"delta":"hello"}`, "keepalive", true},
+		{"sequence with metadata", `{"type":"keepalive","sequence_number":1,"metadata":{}}`, "keepalive", true},
 		{"empty data", "", "keepalive", false},
 		{"unknown event", `{}`, "vendor.keepalive", true},
 		{"conflicting event", `{"type":"keepalive"}`, "response.output_text.delta", true},
@@ -140,7 +149,7 @@ func TestOpenAIUpstreamKeepalivePreservesPreOutputFailover(t *testing.T) {
 					}()
 					heartbeat := openAIUpstreamKeepaliveFixture
 					if named {
-						heartbeat = "event: keepalive\ndata: {}\n\n"
+						heartbeat = "event: keepalive\ndata: {\"sequence_number\":1}\n\n"
 					}
 					_, err := io.WriteString(writer, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_attempt\"}}\n\n"+heartbeat)
 					require.NoError(t, err)

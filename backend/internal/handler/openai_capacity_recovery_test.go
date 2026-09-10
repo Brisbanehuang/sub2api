@@ -120,7 +120,7 @@ func (u *capacityHandlerUpstream) Do(_ *http.Request, _ string, accountID int64,
 	resp.Body = body
 	go func() {
 		defer writer.Close()
-		preamble := "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_attempt\"}}\n\ndata: {\"type\":\"keepalive\"}\n\n"
+		preamble := "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_attempt\"}}\n\ndata: {\"type\":\"keepalive\",\"sequence_number\":1}\n\n"
 		if u.mode == "post_output" {
 			preamble += "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n"
 		}

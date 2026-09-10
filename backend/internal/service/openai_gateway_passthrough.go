@@ -1161,8 +1161,8 @@ func openAIStreamAddedEventStartsClientOutput(payload []byte, eventType string) 
 	}
 }
 
-// Only minimal heartbeat objects are known to be non-semantic. An event name
-// alone must not make an unknown vendor payload safe to replay.
+// A heartbeat may carry an event sequence number, but no content-bearing fields.
+// An event name alone must not make an unknown vendor payload safe to replay.
 func openAIStreamDataIsKeepalive(data, eventType string) bool {
 	eventType = strings.TrimSpace(eventType)
 	if eventType != "" && eventType != "keepalive" {
@@ -1177,7 +1177,15 @@ func openAIStreamDataIsKeepalive(data, eventType string) bool {
 	}
 	keepalive := true
 	payload.ForEach(func(key, value gjson.Result) bool {
-		keepalive = key.Str == "type" && value.Type == gjson.String && value.Str == "keepalive"
+		switch key.Str {
+		case "type":
+			keepalive = value.Type == gjson.String && value.Str == "keepalive"
+		case "sequence_number":
+			_, err := strconv.ParseUint(value.Raw, 10, 64)
+			keepalive = value.Type == gjson.Number && err == nil
+		default:
+			keepalive = false
+		}
 		return keepalive
 	})
 	return keepalive
