@@ -102,6 +102,11 @@ func sameAccountRetryAllowed(failoverErr *service.UpstreamFailoverError, retryCo
 	return retryLimit > 0 && retryCount < retryLimit
 }
 
+func shouldReportOpenAIFailoverAttempt(account *service.Account, err *service.UpstreamFailoverError, retryCount int) bool {
+	return err != nil && err.ShouldReportAccountScheduleFailure() &&
+		(!err.ShouldRetryNextAccount() || !sameAccountRetryAllowed(err, retryCount, effectiveSameAccountRetryLimit(err, account)))
+}
+
 // sameAccountRetryDeadlineAllows prevents a retry from starting after the
 // service-provided same-account retry window has elapsed.
 func sameAccountRetryDeadlineAllows(failoverErr *service.UpstreamFailoverError) bool {

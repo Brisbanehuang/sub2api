@@ -1018,7 +1018,7 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAIAccountLoadPlan(
 			weights.Reset*resetFactor +
 			weights.QuotaHeadroom*quotaHeadroomFactor +
 			weights.UpstreamCost*(upstreamCostFactor-openAIUpstreamCostNeutralFactor)
-		if req.StickyWeighted {
+		if req.StickyWeighted && !s.shouldEscapeWeightedStickyAccount(req, item.account.ID) {
 			if req.PreviousResponseCanMove && req.StickyPreviousAccountID > 0 && item.account.ID == req.StickyPreviousAccountID {
 				item.score += weights.Previous
 			}
@@ -1049,6 +1049,22 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 		if len(pool) == 0 || plan.topK <= 0 {
 			return nil
 		}
+		var escaped []openAIAccountCandidateScore
+		if req.StickyWeighted {
+			preferred := make([]openAIAccountCandidateScore, 0, len(pool))
+			for _, candidate := range pool {
+				if s.shouldEscapeWeightedStickyAccount(req, candidate.account.ID) {
+					escaped = append(escaped, candidate)
+				} else {
+					preferred = append(preferred, candidate)
+				}
+			}
+			if len(preferred) > 0 {
+				pool = preferred
+			} else {
+				escaped = nil
+			}
+		}
 		groupTopK := plan.topK
 		if groupTopK > len(pool) {
 			groupTopK = len(pool)
@@ -1057,7 +1073,7 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 		var primary []openAIAccountCandidateScore
 		if req.StickyWeighted {
 			for _, stickyID := range []int64{req.StickyPreviousAccountID, req.StickyAccountID} {
-				if stickyID <= 0 {
+				if stickyID <= 0 || s.shouldEscapeWeightedStickyAccount(req, stickyID) {
 					continue
 				}
 				for i, candidate := range ranked {
@@ -1076,7 +1092,7 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 			primary = buildOpenAIWeightedSelectionOrder(ranked, req)
 		}
 		if !plan.includeOverflowFallback || groupTopK >= len(pool) {
-			return primary
+			return append(primary, escaped...)
 		}
 
 		selected := make(map[int64]struct{}, len(primary))
@@ -1092,7 +1108,7 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 		sort.Slice(overflow, func(i, j int) bool {
 			return isOpenAIAccountCandidateBetter(overflow[i], overflow[j])
 		})
-		return append(primary, overflow...)
+		return append(append(primary, overflow...), escaped...)
 	}
 
 	if req.RequireCompact {
@@ -1116,6 +1132,15 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 	}
 
 	return buildSelectionOrder(plan.candidates)
+}
+
+func (s *defaultOpenAIAccountScheduler) shouldEscapeWeightedStickyAccount(req OpenAIAccountScheduleRequest, accountID int64) bool {
+	if !req.StickyWeighted || s.service == nil ||
+		(accountID != req.StickyAccountID && (!req.PreviousResponseCanMove || accountID != req.StickyPreviousAccountID)) {
+		return false
+	}
+	_, _, _, escape := s.shouldEscapeStickyAccount(accountID, s.service.openAIStickyEscapeConfig())
+	return escape
 }
 
 func sortOpenAICompactRetryCandidates(pool []openAIAccountCandidateScore) []openAIAccountCandidateScore {
