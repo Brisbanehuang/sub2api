@@ -84,7 +84,7 @@ func TestOpenAICapacityBlockingStreamRecovery(t *testing.T) {
 								gotErr, gotUsage = err, result.usage
 							}
 						}()
-						_, err := io.WriteString(writer, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n")
+						_, err := io.WriteString(writer, openAIUpstreamKeepaliveFixture+"data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n")
 						require.NoError(t, err)
 						synctest.Wait()
 						started := time.Now()

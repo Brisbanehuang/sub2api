@@ -1161,9 +1161,34 @@ func openAIStreamAddedEventStartsClientOutput(payload []byte, eventType string) 
 	}
 }
 
+// Only minimal heartbeat objects are known to be non-semantic. An event name
+// alone must not make an unknown vendor payload safe to replay.
+func openAIStreamDataIsKeepalive(data, eventType string) bool {
+	eventType = strings.TrimSpace(eventType)
+	if eventType != "" && eventType != "keepalive" {
+		return false
+	}
+	if !gjson.Valid(data) {
+		return false
+	}
+	payload := gjson.Parse(data)
+	if !payload.IsObject() || (eventType == "" && payload.Get("type").String() != "keepalive") {
+		return false
+	}
+	keepalive := true
+	payload.ForEach(func(key, value gjson.Result) bool {
+		keepalive = key.Str == "type" && value.Type == gjson.String && value.Str == "keepalive"
+		return keepalive
+	})
+	return keepalive
+}
+
 func openAIStreamDataStartsClientOutput(data, eventType string) bool {
 	trimmed := strings.TrimSpace(data)
 	if trimmed == "" {
+		return false
+	}
+	if openAIStreamDataIsKeepalive(trimmed, eventType) {
 		return false
 	}
 	switch strings.TrimSpace(eventType) {
@@ -1245,6 +1270,9 @@ func openAIStreamDataStartsVisibleOutput(data, eventType string) bool {
 func openAIStreamDataStartsSemanticTTFT(data, eventType string) bool {
 	trimmed := strings.TrimSpace(data)
 	if trimmed == "" || trimmed == "[DONE]" {
+		return false
+	}
+	if openAIStreamDataIsKeepalive(trimmed, eventType) {
 		return false
 	}
 	eventType = strings.TrimSpace(eventType)

@@ -98,8 +98,9 @@ func (b *capacityHandlerBody) Close() error {
 
 type capacityHandlerUpstream struct {
 	service.HTTPUpstream
-	mode  string
-	calls []int64
+	mode       string
+	calls      []int64
+	failedBody *capacityHandlerBody
 }
 
 func (u *capacityHandlerUpstream) Do(_ *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
@@ -109,16 +110,21 @@ func (u *capacityHandlerUpstream) Do(_ *http.Request, _ string, accountID int64,
 		resp.Body = io.NopCloser(strings.NewReader(capacityHandlerSuccess))
 		return resp, nil
 	}
-	if u.mode != "post_output" {
+	if u.mode != "post_output" && u.mode != "keepalive" {
 		resp.Body = io.NopCloser(strings.NewReader(capacityHandlerError))
 		return resp, nil
 	}
 	reader, writer := io.Pipe()
 	body := &capacityHandlerBody{PipeReader: reader, closed: make(chan struct{})}
+	u.failedBody = body
 	resp.Body = body
 	go func() {
 		defer writer.Close()
-		_, _ = io.WriteString(writer, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n"+capacityHandlerError)
+		preamble := "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_attempt\"}}\n\ndata: {\"type\":\"keepalive\"}\n\n"
+		if u.mode == "post_output" {
+			preamble += "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n"
+		}
+		_, _ = io.WriteString(writer, preamble+capacityHandlerError)
 		<-body.closed
 	}()
 	return resp, nil
@@ -164,6 +170,28 @@ func newCapacityRecoveryHandler(t *testing.T, mode string, explicitRules bool) (
 		service.NewAPIKeyService(nil, nil, nil, nil, nil, nil, cfg), nil, nil, nil, nil, cfg)
 	handler.maxAccountSwitches = 2
 	return handler, upstream, repo, cache, health
+}
+
+func TestOpenAICapacityKeepaliveFailsOverWithinRequest(t *testing.T) {
+	handler, upstream, repo, slots, health := newCapacityRecoveryHandler(t, "keepalive", true)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, rec := newOpenAIResponsesFailoverTestContext(t, ctx)
+	c.Request.Body = io.NopCloser(strings.NewReader(`{"model":"gpt-5.1","stream":true,"input":"hello"}`))
+	c.Request.Header.Set("session_id", "same-session")
+	handler.Responses(c)
+	require.Equal(t, []int64{1, 2}, upstream.calls, "heartbeat-only failure must switch before returning to the client")
+	require.False(t, repo.accounts[0].IsSchedulableForModelWithContext(context.Background(), "gpt-5.1"))
+	require.Zero(t, health.calls)
+	require.Equal(t, int32(2), atomic.LoadInt32(&slots.releaseAccountCalled))
+	require.Contains(t, rec.Body.String(), "response_ok")
+	require.NotContains(t, rec.Body.String(), "resp_attempt", "failed attempt preamble must remain private")
+	require.NotContains(t, rec.Body.String(), "overloaded")
+	select {
+	case <-upstream.failedBody.closed:
+	default:
+		t.Fatal("failed upstream connection was not closed")
+	}
 }
 
 func TestOpenAICapacityClientReconnectAvoidsCooledStickyAccount(t *testing.T) {
