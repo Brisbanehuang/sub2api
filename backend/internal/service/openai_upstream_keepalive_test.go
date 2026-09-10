@@ -1,6 +1,9 @@
 package service
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +19,64 @@ import (
 )
 
 const openAIUpstreamKeepaliveFixture = "data: {\"type\":\"keepalive\"}\n\n"
+
+func TestOpenAIUnrecognizedKeepaliveDiagnostics(t *testing.T) {
+	for _, passthrough := range []bool{false, true} {
+		t.Run(fmt.Sprintf("passthrough=%t", passthrough), func(t *testing.T) {
+			logSink, restore := captureStructuredLog(t)
+			defer restore()
+			reader, writer := io.Pipe()
+			body := &capacityBlockingBody{PipeReader: reader, closed: make(chan struct{})}
+			t.Cleanup(func() { _ = writer.Close(); _ = body.Close() })
+			svc := &OpenAIGatewayService{cfg: &config.Config{}}
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: body}
+			payload := `{"type":"keepalive","timestamp":1234567,"message":"private-user-text","metadata":{"secret":"private-key"}}`
+			go func() {
+				defer func() { _ = writer.Close() }()
+				_, _ = io.WriteString(writer, openAIUpstreamKeepaliveFixture+"data: "+payload+"\n\ndata: "+payload+"\n\ndata: "+capacityFailedUsageFixture+"\n\n")
+			}()
+			var gotErr error
+			if passthrough {
+				_, gotErr = svc.handleStreamingResponsePassthrough(c.Request.Context(), resp, c, capacityRuleAccount(), time.Now(), "public", "upstream")
+			} else {
+				_, gotErr = svc.handleStreamingResponse(c.Request.Context(), resp, c, capacityRuleAccount(), time.Now(), "public", "upstream")
+			}
+			var failover *UpstreamFailoverError
+			require.Error(t, gotErr)
+			require.False(t, errors.As(gotErr, &failover), "diagnostics must not relax replay safety")
+			require.Contains(t, rec.Body.String(), payload, "unknown frames remain untouched")
+			logSink.mu.Lock()
+			defer logSink.mu.Unlock()
+			count := 0
+			for _, event := range logSink.events {
+				if event.Message != "openai.unrecognized_keepalive" {
+					continue
+				}
+				count++
+				encoded, err := json.Marshal(event.Fields)
+				require.NoError(t, err)
+				require.Contains(t, string(encoded), `"timestamp":"number"`)
+				require.Contains(t, string(encoded), `"message":"string"`)
+				require.Contains(t, string(encoded), `"metadata":"object"`)
+				for _, secret := range []string{"1234567", "private-user-text", "private-key", `"secret"`} {
+					require.NotContains(t, string(encoded), secret)
+				}
+			}
+			require.Equal(t, 1, count, "log once per attempt, not once per heartbeat")
+		})
+	}
+}
+
+func TestOpenAIUnrecognizedKeepaliveDiagnosticsSkipsOAuth(t *testing.T) {
+	logSink, restore := captureStructuredLog(t)
+	defer restore()
+	var diag openAICapacityStreamDiagnostics
+	diag.unrecognizedKeepalive(context.Background(), &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}, "native_sse", []byte(`{"type":"keepalive","timestamp":1}`))
+	require.False(t, logSink.ContainsMessage("openai.unrecognized_keepalive"))
+}
 
 func TestOpenAIUpstreamKeepaliveOutputClassification(t *testing.T) {
 	for _, tc := range []struct {

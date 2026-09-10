@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
 )
 
@@ -113,6 +114,58 @@ type openAICapacityStreamDiagnostics struct {
 	errorObservedAt    time.Time
 	failureDeliveredAt time.Time
 	finishReason       string
+	keepaliveLogged    bool
+}
+
+// Record only the shape of the first unrecognized heartbeat in an attempt.
+// Values and nested keys can contain user content and must not enter the log.
+func (d *openAICapacityStreamDiagnostics) unrecognizedKeepalive(ctx context.Context, account *Account, path string, data []byte) {
+	if d.keepaliveLogged || account == nil || !account.IsOpenAIApiKey() {
+		return
+	}
+	d.keepaliveLogged = true
+	kindOf := func(value gjson.Result) string {
+		switch value.Type {
+		case gjson.String:
+			return "string"
+		case gjson.Number:
+			return "number"
+		case gjson.True, gjson.False:
+			return "boolean"
+		case gjson.JSON:
+			if value.IsArray() {
+				return "array"
+			}
+			return "object"
+		default:
+			return "null"
+		}
+	}
+	kind := "invalid_json"
+	fieldTypes := make(map[string]string)
+	omitted := false
+	if gjson.ValidBytes(data) {
+		payload := gjson.ParseBytes(data)
+		kind = kindOf(payload)
+		if payload.IsObject() {
+			payload.ForEach(func(key, value gjson.Result) bool {
+				if len(fieldTypes) >= 16 {
+					omitted = true
+					return false
+				}
+				if len(key.Str) > 64 {
+					omitted = true
+					return true
+				}
+				fieldTypes[key.Str] = kindOf(value)
+				return true
+			})
+		}
+	}
+	logger.FromContext(ctx).Warn("openai.unrecognized_keepalive",
+		zap.Int64("account_id", account.ID), zap.String("path", path),
+		zap.Int("data_bytes", len(data)), zap.String("payload_kind", kind),
+		zap.Any("field_types", fieldTypes), zap.Bool("fields_omitted", omitted))
 }
 
 func (d *openAICapacityStreamDiagnostics) committed(eventType string, size int) {
