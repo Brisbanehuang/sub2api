@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -2365,7 +2367,9 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	}
 
 	var stickyAccountID int64
-	if sessionHash != "" && s.cache != nil {
+	if state := openAIStickySuccessFromContext(ctx); state != nil && state.groupID == derefGroupID(groupID) && state.sessionHash == sessionHash && state.model == strings.TrimSpace(requestedModel) {
+		stickyAccountID = state.originalID
+	} else if sessionHash != "" && s.cache != nil {
 		if accountID, err := s.getStickySessionAccountID(ctx, groupID, sessionHash); err == nil && accountID > 0 {
 			stickyAccountID = accountID
 		}
@@ -2377,7 +2381,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 		stickyPreviousAccountID = s.ResolveAccountIDByPreviousResponseIDForScheduler(ctx, groupID, previousResponseID, requestedModel, excludedIDs, requiredCapability, requireCompact)
 	}
 
-	return scheduler.Select(ctx, OpenAIAccountScheduleRequest{
+	selection, decision, err := scheduler.Select(ctx, OpenAIAccountScheduleRequest{
 		GroupID:                 groupID,
 		Platform:                platform,
 		SessionHash:             sessionHash,
@@ -2398,6 +2402,20 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 		RequireCompact:          requireCompact,
 		ExcludedIDs:             excludedIDs,
 	})
+	if state := openAIStickySuccessFromContext(ctx); state != nil && selection != nil && selection.Account != nil {
+		reason := ""
+		var errorRate, ttft float64
+		if active, ok := scheduler.(*defaultOpenAIAccountScheduler); ok {
+			reason, errorRate, ttft, _ = active.shouldEscapeStickyAccount(stickyAccountID, s.openAIStickyEscapeConfig())
+		}
+		logger.FromContext(ctx).Info("openai.sticky_selection",
+			zap.Int64("group_id", derefGroupID(groupID)), zap.String("model", requestedModel),
+			zap.Int64("sticky_account_id", stickyAccountID), zap.Int64("account_id", selection.Account.ID),
+			zap.Bool("success_preference", state.expected.AccountID > 0),
+			zap.Bool("sticky_hit", stickyAccountID == selection.Account.ID), zap.String("layer", decision.Layer),
+			zap.String("escape_reason", reason), zap.Float64("sticky_error_rate", errorRate), zap.Float64("sticky_ttft_ms", ttft))
+	}
+	return selection, decision, err
 }
 
 func accountSupportsOpenAICapabilities(account *Account, requiredCapability OpenAIEndpointCapability, requiredImageCapability OpenAIImagesCapability) bool {

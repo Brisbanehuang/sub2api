@@ -639,6 +639,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	// 生图意图只影响能力路由与图片计费，不关门：混合 /v1/responses 请求的
 	// token 计费部分仍受利润门保护，独立图片/视频端点才在门外。
 	pricingCtx, pricingAt := h.gatewayService.WithOpenAIRequestPricingContext(c.Request.Context(), apiKey.GroupID)
+	if requestPlatform == service.PlatformOpenAI && !legacyCompact && !nativeV2 {
+		pricingCtx = h.gatewayService.BeginOpenAIStickySuccess(pricingCtx, apiKey.GroupID, sessionHash, forwardModel)
+	}
 	c.Request = c.Request.WithContext(pricingCtx)
 
 	for {
@@ -837,6 +840,8 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		}
 		if err != nil {
 			if result != nil && result.ClientDisconnect {
+				c.Set(opsClientDisconnectedKey, true)
+				h.gatewayService.ReportOpenAIFailureAfterDisconnect(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, result), err)
 				reqLog.Info("openai.client_disconnected",
 					zap.Int64("account_id", account.ID),
 					zap.Error(err),
@@ -845,6 +850,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				return
 			}
 			if failoverClientGone(c) {
+				h.gatewayService.ReportOpenAIFailureAfterDisconnect(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, result), err)
 				reqLog.Info("openai.client_disconnected",
 					zap.Int64("account_id", account.ID),
 					zap.Error(err),
@@ -862,6 +868,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				var failoverErr *service.UpstreamFailoverError
 				if errors.As(err, &failoverErr) {
 					if failoverClientGone(c) {
+						h.gatewayService.ReportOpenAIFailureAfterDisconnect(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, result), err)
 						reqLog.Info("openai.failover_aborted_client_disconnected",
 							zap.Int64("account_id", account.ID),
 							zap.Int("upstream_status", failoverErr.StatusCode),
@@ -963,6 +970,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			}
 		}
 		if result != nil {
+			if err == nil {
+				h.gatewayService.CommitOpenAIStickySuccess(c.Request.Context(), account, result)
+			}
 			// 排除 spark 影子:其 codex_* 仅由 QueryUsage(/wham/usage bengalfox)更新(外审第7轮 P1)。
 			if account.Type == service.AccountTypeOAuth && !account.IsShadow() {
 				h.gatewayService.UpdateCodexUsageSnapshotFromHeaders(c.Request.Context(), account.ID, result.ResponseHeaders)

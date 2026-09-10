@@ -13,7 +13,11 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	"github.com/Wei-Shaw/sub2api/internal/repository"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 )
 
@@ -67,6 +71,8 @@ func (u *capacityHandlerUsage) Create(context.Context, *service.UsageLog) (bool,
 
 type capacityHandlerSettings struct{ service.SettingRepository }
 
+func (*capacityHandlerSettings) SetMultiple(context.Context, map[string]string) error { return nil }
+
 func (*capacityHandlerSettings) GetValue(context.Context, string) (string, error) {
 	return `{"enabled":true,"window_minutes":10,"failure_threshold":100,"cooldown_minutes":2}`, nil
 }
@@ -101,11 +107,19 @@ type capacityHandlerUpstream struct {
 	mode       string
 	calls      []int64
 	failedBody *capacityHandlerBody
+	onError    func()
 }
 
 func (u *capacityHandlerUpstream) Do(_ *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
 	u.calls = append(u.calls, accountID)
 	resp := &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}}
+	if u.mode == "canceled_524" || u.mode == "canceled_only" {
+		u.onError()
+		if u.mode == "canceled_only" {
+			return nil, context.Canceled
+		}
+		return &http.Response{StatusCode: 524, Header: http.Header{"Content-Type": []string{"text/html"}}, Body: io.NopCloser(strings.NewReader("error code: 524"))}, nil
+	}
 	if u.mode == "healthy" || (accountID == 2 && u.mode != "all_failed") {
 		resp.Body = io.NopCloser(strings.NewReader(capacityHandlerSuccess))
 		return resp, nil
@@ -130,10 +144,31 @@ func (u *capacityHandlerUpstream) Do(_ *http.Request, _ string, accountID int64,
 	return resp, nil
 }
 
-func newCapacityRecoveryHandler(t *testing.T, mode string, explicitRules bool) (*OpenAIGatewayHandler, *capacityHandlerUpstream, *capacityHandlerRepo, *concurrencyCacheMock, *capacityHandlerHealth) {
+func TestOpenAICapacityCanceledRequestStillObservesConfirmedFailure(t *testing.T) {
+	for _, mode := range []string{"canceled_524", "canceled_only"} {
+		t.Run(mode, func(t *testing.T) {
+			handler, upstream, _, slots, health := newCapacityRecoveryHandler(t, mode, false)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			upstream.onError = cancel
+			c, _ := newOpenAIResponsesFailoverTestContext(t, ctx)
+			handler.Responses(c)
+			require.Equal(t, []int64{1}, upstream.calls, "never replay after cancellation")
+			require.Equal(t, int32(1), atomic.LoadInt32(&slots.releaseAccountCalled))
+			if mode == "canceled_524" {
+				require.Equal(t, 1, health.calls, "confirmed upstream failure must be observed exactly once")
+			} else {
+				require.Zero(t, health.calls, "client cancellation is not an account failure")
+			}
+		})
+	}
+}
+
+func newCapacityRecoveryHandler(t *testing.T, mode string, explicitRules bool, stickyCache ...service.GatewayCache) (*OpenAIGatewayHandler, *capacityHandlerUpstream, *capacityHandlerRepo, *concurrencyCacheMock, *capacityHandlerHealth) {
 	t.Helper()
 	repo := &capacityHandlerRepo{changed: make(chan struct{}, 4)}
 	for i := int64(1); i <= 2; i++ {
+		rate := 0.2
 		credentials := map[string]any{"api_key": "test-only", "pool_mode": true, "pool_mode_retry_count": float64(2)}
 		if explicitRules {
 			credentials["temp_unschedulable_enabled"] = true
@@ -144,7 +179,7 @@ func newCapacityRecoveryHandler(t *testing.T, mode string, explicitRules bool) (
 		repo.accounts = append(repo.accounts, service.Account{
 			ID: i, Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey,
 			Status: service.StatusActive, Schedulable: true, Concurrency: 1, Priority: int(i),
-			Credentials: credentials, GroupIDs: []int64{3131},
+			Credentials: credentials, GroupIDs: []int64{3131}, RateMultiplier: &rate,
 		})
 	}
 	cfg := &config.Config{RunMode: config.RunModeSimple}
@@ -161,8 +196,12 @@ func newCapacityRecoveryHandler(t *testing.T, mode string, explicitRules bool) (
 	upstream := &capacityHandlerUpstream{mode: mode}
 	billingCache := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
 	t.Cleanup(billingCache.Stop)
+	var sticky service.GatewayCache = &capacityHandlerSticky{}
+	if len(stickyCache) > 0 {
+		sticky = stickyCache[0]
+	}
 	gateway := service.NewOpenAIGatewayService(
-		repo, &capacityHandlerUsage{}, nil, nil, nil, nil, &capacityHandlerSticky{}, cfg, nil, concurrency,
+		repo, &capacityHandlerUsage{}, nil, nil, nil, nil, sticky, cfg, nil, concurrency,
 		service.NewBillingService(cfg, nil), rateLimit, billingCache, upstream,
 		&service.DeferredService{}, nil, nil, nil, nil, nil, nil, nil,
 	)
@@ -170,6 +209,42 @@ func newCapacityRecoveryHandler(t *testing.T, mode string, explicitRules bool) (
 		service.NewAPIKeyService(nil, nil, nil, nil, nil, nil, cfg), nil, nil, nil, nil, cfg)
 	handler.maxAccountSwitches = 2
 	return handler, upstream, repo, cache, health
+}
+
+func TestOpenAIStickySuccessHandlerFailureRecoveryAndNextRequest(t *testing.T) {
+	settings := service.NewSettingService(&capacityHandlerSettings{}, &config.Config{})
+	require.NoError(t, settings.UpdateSettings(context.Background(), &service.SystemSettings{
+		OpenAIAdvancedSchedulerEnabled: true, OpenAIAdvancedSchedulerStickyWeightedEnabled: true,
+	}))
+	t.Cleanup(func() { require.NoError(t, settings.UpdateSettings(context.Background(), &service.SystemSettings{})) })
+	r := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: r.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	cache := repository.NewGatewayCache(client)
+	handler, upstream, repo, _, _ := newCapacityRecoveryHandler(t, "keepalive", true, cache)
+	group := &service.Group{ID: 3131, Hydrated: true, Status: service.StatusActive, Platform: service.PlatformOpenAI, RateMultiplier: 1, ProfitControlEnabled: true, ProfitMinMargin: 0.5}
+	ctx := context.WithValue(context.Background(), ctxkey.Group, group)
+	first, rec := newOpenAIResponsesFailoverTestContext(t, ctx)
+	first.Request.Header.Set("session_id", "success-session")
+	first.Request.Body = io.NopCloser(strings.NewReader(`{"model":"gpt-5.1","stream":true,"input":"hello"}`))
+	sessionHash := handler.gatewayService.GenerateSessionHash(first, nil)
+	require.NoError(t, cache.SetSessionAccountID(ctx, group.ID, "openai:"+sessionHash, 1, time.Hour))
+	handler.Responses(first)
+	require.Equal(t, []int64{1, 2}, upstream.calls)
+	require.Contains(t, rec.Body.String(), "response_ok")
+	successCache, ok := cache.(service.OpenAIStickySuccessCache)
+	require.True(t, ok)
+	preference, err := successCache.GetOpenAIStickySuccess(ctx, group.ID, sessionHash, "gpt-5.1")
+	require.NoError(t, err)
+	require.Equal(t, int64(2), preference.AccountID)
+	// The old account has recovered. It must not reclaim this model's affinity.
+	repo.accounts[0].Extra = nil
+	upstream.mode = "healthy"
+	next, nextRec := newOpenAIResponsesFailoverTestContext(t, ctx)
+	next.Request.Header.Set("session_id", "success-session")
+	handler.Responses(next)
+	require.Equal(t, []int64{1, 2, 2}, upstream.calls)
+	require.Contains(t, nextRec.Body.String(), "response_ok")
 }
 
 func TestOpenAICapacityKeepaliveFailsOverWithinRequest(t *testing.T) {
