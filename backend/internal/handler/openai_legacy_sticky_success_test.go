@@ -50,7 +50,9 @@ func newOpenAILegacySuccessFixture(t *testing.T, upstream *stickyUpstream, cache
 	require.NoError(t, settings.UpdateSettings(context.Background(), stored))
 	t.Cleanup(func() {
 		stored.OpenAILowUpstreamRatePriorityEnabled = false
-		require.NoError(t, settings.UpdateSettings(context.Background(), stored))
+		// A request may still be finishing an asynchronous settings refresh.
+		reset := service.NewSettingService(&contentModerationHandlerSettingRepo{}, cfg)
+		require.NoError(t, reset.UpdateSettings(context.Background(), stored))
 	})
 	rateLimit := service.NewRateLimitService(repo, nil, cfg, nil, nil)
 	rateLimit.SetSettingService(settings)
