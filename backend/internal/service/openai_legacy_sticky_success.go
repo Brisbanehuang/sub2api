@@ -14,8 +14,17 @@ type openAILegacyStickySuccessKey struct{}
 // BeginOpenAILegacyStickySuccess is opt-in for migratable HTTP text requests.
 // The handler excludes protocol-bound requests before calling it. The existing
 // group/session/model CAS cache is reused with the OpenAI session namespace.
+//
+// Groups without profit control are armed too. Their session ownership is only
+// written while *selecting* an account, so whether the account that actually
+// succeeded takes over depends on it being the last one picked in that request:
+// a candidate that is merely selected and then fails still replaces the account
+// that previously succeeded. Such groups only hand over the *candidate source*
+// (success preference first, legacy binding as the compatible fallback); the
+// legacy sticky key keeps its eager write/renew/clear semantics verbatim, see
+// openAILegacyStickySuccessWritesManaged.
 func (s *OpenAIGatewayService) BeginOpenAILegacyStickySuccess(ctx context.Context, groupID *int64, sessionHash, model string) context.Context {
-	if s == nil || s.cache == nil || !gatewayProfitControlGateActive(ctx) ||
+	if s == nil || s.cache == nil ||
 		s.isOpenAIAdvancedSchedulerEnabled(ctx) || preserveOpenAIGuardianParentBinding(ctx, sessionHash) ||
 		sessionHash == "" || strings.TrimSpace(model) == "" {
 		return ctx
@@ -26,6 +35,7 @@ func (s *OpenAIGatewayService) BeginOpenAILegacyStickySuccess(ctx context.Contex
 	}
 	state := &gatewayStickySuccessState{
 		groupID: derefGroupID(groupID), sessionHash: sessionHash, model: strings.TrimSpace(model),
+		legacyWritesManaged: gatewayProfitControlGateActive(ctx),
 	}
 	binding, err := s.cache.GetGatewayStickySuccess(ctx, state.groupID, s.openAISessionCacheKey(sessionHash), state.model)
 	if err != nil && !errors.Is(err, ErrStickySessionNotFound) {
@@ -51,6 +61,22 @@ func openAILegacyStickySuccessCandidate(ctx context.Context, groupID *int64, ses
 		return 0, false
 	}
 	return state.originalID, true
+}
+
+// openAILegacyStickySuccessWritesManaged reports whether the legacy sticky key
+// write/renew/clear calls are managed by the success preference as well.
+//
+// Only groups under a profit gate are: selection there never binds eagerly, so
+// the single legacy write point is the post-admission binding and it has to be
+// turned into "write only after a confirmed success" together with the
+// preference. Groups without profit control merely swap the candidate source,
+// so the legacy key keeps being written, renewed and cleared exactly as before
+// and every other reader of it (WebSocket, count_tokens, the previous_response
+// ownership chain, Guardian) is unaffected.
+func openAILegacyStickySuccessWritesManaged(ctx context.Context, groupID *int64, sessionHash string) bool {
+	state := openAILegacyStickySuccessFromContext(ctx)
+	return state != nil && state.legacyWritesManaged &&
+		state.groupID == derefGroupID(groupID) && state.sessionHash == sessionHash
 }
 
 // CommitOpenAILegacyStickySuccess is called only after Forward returns without

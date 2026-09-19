@@ -81,6 +81,11 @@ type gatewayStickySuccessState struct {
 	// originalID 是本请求的粘性候选：成功偏好优先，没有成功偏好时兼容读旧绑定。
 	// 旧绑定只作软候选，不视为「已确认成功」，因此替代账号成功后可以直接接替。
 	originalID int64
+	// legacyWritesManaged 只由 OpenAI 旧调度入口使用：true 表示旧 sticky 键的
+	// 写入 / 续期 / 删除也由成功偏好接管（利润控制分组，门下选号内部本就不做
+	// eager 绑定，旧键唯一写入点是终检后绑定）；false 表示只接管候选来源，旧键
+	// 语义逐字不变（普通分组）。通用路径只在利润门下装配，不读这个字段。
+	legacyWritesManaged bool
 }
 
 // armGatewayStickySuccess 在调度器解析出**实际生效的分组**之后装配请求级成功

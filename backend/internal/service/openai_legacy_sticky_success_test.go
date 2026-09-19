@@ -80,16 +80,31 @@ func TestOpenAILegacyStickySuccessLifecycle(t *testing.T) {
 	require.False(t, managed, "another group must not inherit the preference")
 }
 
-func TestOpenAILegacyStickySuccessRequiresProfitGateAndLegacyScheduler(t *testing.T) {
+// Arming only depends on the legacy scheduler being in charge. The profit gate
+// no longer decides whether the state exists, only whether the legacy sticky
+// key writes are taken over along with it.
+func TestOpenAILegacyStickySuccessRequiresLegacySchedulerAndGatesLegacyWrites(t *testing.T) {
 	for _, advanced := range []bool{false, true} {
 		resetOpenAIAdvancedSchedulerSettingCacheForTest()
 		svc := &OpenAIGatewayService{cache: &openAILegacySuccessTestCache{bindings: map[string]GatewayStickySuccessBinding{}}}
-		require.Nil(t, openAILegacyStickySuccessFromContext(svc.BeginOpenAILegacyStickySuccess(context.Background(), nil, "session", "model")))
 		if advanced {
 			svc.rateLimitService = &RateLimitService{settingService: NewSettingService(&openAIAdvancedSchedulerSettingRepoStub{
 				values: map[string]string{openAIAdvancedSchedulerSettingKey: "true"},
 			}, nil)}
 		}
+
+		// No profit gate: the legacy scheduler still arms, candidate source only.
+		ungated := openAILegacyStickySuccessFromContext(
+			svc.BeginOpenAILegacyStickySuccess(context.Background(), nil, "session", "model"))
+		if advanced {
+			require.Nil(t, ungated, "the advanced scheduler owns its own preference")
+		} else {
+			require.NotNil(t, ungated, "groups without profit control must arm too")
+			require.False(t, ungated.legacyWritesManaged, "legacy key writes stay untouched there")
+			require.False(t, openAILegacyStickySuccessWritesManaged(
+				context.WithValue(context.Background(), openAILegacyStickySuccessKey{}, ungated), nil, "session"))
+		}
+
 		group := profitControlTestGroup(7, 0, 0)
 		ctx, _ := svc.WithOpenAIRequestPricingContext(profitControlTestCtx(group), &group.ID)
 		state := openAILegacyStickySuccessFromContext(svc.BeginOpenAILegacyStickySuccess(ctx, &group.ID, "session", "model"))
@@ -97,6 +112,7 @@ func TestOpenAILegacyStickySuccessRequiresProfitGateAndLegacyScheduler(t *testin
 			require.Nil(t, state)
 		} else {
 			require.NotNil(t, state)
+			require.True(t, state.legacyWritesManaged, "profit-controlled groups keep the managed legacy writes")
 		}
 	}
 	resetOpenAIAdvancedSchedulerSettingCacheForTest()

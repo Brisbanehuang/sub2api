@@ -17,6 +17,22 @@ import (
 // 契约：可迁移 HTTP 会话的候选必须跟着**确认成功**的账号走；只被选中、随后
 // 失败的账号不得夺走它。旧 sticky 键仍按官方 eager 语义维护。
 
+// normalGroupEagerSessionBinding 返回 7 号分组下那条**会话**旧 sticky 绑定，
+// 跳过 response / http-response-owner 这两类既有的响应归属键。
+func normalGroupEagerSessionBinding(c *stickyGatewayTestCache) (int64, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for key, accountID := range c.bindings {
+		if !strings.HasPrefix(key, "binding:7:openai:") ||
+			strings.HasPrefix(key, "binding:7:openai:response:") ||
+			strings.HasPrefix(key, "binding:7:openai:http-response-owner:") {
+			continue
+		}
+		return accountID, true
+	}
+	return 0, false
+}
+
 type openAINormalGroupStickyCase struct{ name, path, body, response string }
 
 func openAINormalGroupStickyCases() []openAINormalGroupStickyCase {
@@ -64,16 +80,9 @@ func TestOpenAILegacyStickySuccessNormalGroupHTTPFailover(t *testing.T) {
 			require.Equal(t, []int64{2}, upstream.hitOrder(), "下一个同会话请求首跳必须是 failover 成功的 B")
 
 			// 普通分组只接管候选来源：旧 sticky 键仍被 eager 写入。
-			require.EqualValues(t, 2, cache.bindingFor(7), "旧 sticky 键仍按官方 eager 语义维护")
-			var eagerBinding bool
-			for _, key := range cache.keys() {
-				if strings.HasPrefix(key, "binding:7:openai:") &&
-					!strings.HasPrefix(key, "binding:7:openai:response:") &&
-					!strings.HasPrefix(key, "binding:7:openai:http-response-owner:") {
-					eagerBinding = true
-				}
-			}
-			require.True(t, eagerBinding, "普通分组的旧键写入不得被成功偏好接管")
+			accountID, bound := normalGroupEagerSessionBinding(cache)
+			require.True(t, bound, "普通分组的旧键写入不得被成功偏好接管")
+			require.EqualValues(t, 2, accountID, "旧 sticky 键仍按官方 eager 语义维护")
 		})
 	}
 }

@@ -129,13 +129,15 @@ func TestOpenAILegacyStickySuccessHTTPAllFail(t *testing.T) {
 	require.Empty(t, cache.keys())
 }
 
+// previous_response_id 绑定的请求不接入软偏好：那条归属链有自己的账号解析规则。
+// 未开启利润控制的普通分组不再是边界，见 openai_legacy_normal_group_sticky_test.go。
 func TestOpenAILegacyStickySuccessHTTPBoundary(t *testing.T) {
 	for _, tc := range []struct {
 		name, body string
 		profit     bool
 	}{
-		{name: "profit disabled", body: `{"model":"gpt-test","input":"hello"}`},
 		{name: "previous response", profit: true, body: `{"model":"gpt-test","input":"hello","previous_response_id":"resp_parent"}`},
+		{name: "previous response without profit control", body: `{"model":"gpt-test","input":"hello","previous_response_id":"resp_parent"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			upstream := &stickyUpstream{scripts: map[int64][]stickyScript{1: {{statusCode: 200, jsonBody: `{"id":"resp_test","model":"gpt-test","output":[]}`}}}}
