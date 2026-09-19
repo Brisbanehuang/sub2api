@@ -438,7 +438,7 @@ func (s *OpenAIGatewayService) refreshOpenAITerminalAdmissionAccount(ctx context
 // behavior for requests without a terminal admission check. Profit-controlled
 // and client-restricted requests bind only after the post-slot refresh.
 func (s *OpenAIGatewayService) bindOpenAIStickySessionDuringSelection(ctx context.Context, groupID *int64, sessionHash string, accountID int64) error {
-	if openAIStickyAdmissionDeferred(ctx) {
+	if openAIStickyAdmissionDeferred(ctx) || preserveOpenAIGuardianParentBinding(ctx, sessionHash) {
 		return nil
 	}
 	return s.BindStickySession(ctx, groupID, sessionHash, accountID)
@@ -451,6 +451,9 @@ func (s *OpenAIGatewayService) bindOpenAIStickySessionDuringSelection(ctx contex
 // failover still replaces stale sticky bindings as it did before this feature.
 func (s *OpenAIGatewayService) BindStickySessionAfterProfitAdmission(ctx context.Context, groupID *int64, sessionHash string, accountID int64) error {
 	if sessionHash == "" || accountID <= 0 {
+		return nil
+	}
+	if preserveOpenAIGuardianParentBinding(ctx, sessionHash) {
 		return nil
 	}
 	if !openAIStickyAdmissionDeferred(ctx) {

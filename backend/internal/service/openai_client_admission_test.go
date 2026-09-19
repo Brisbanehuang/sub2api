@@ -427,11 +427,14 @@ func TestCodexClientAdmissionPreviousResponseBindingIsPreserved(t *testing.T) {
 	restricted := codexAdmissionAccount(45, true)
 	restricted.GroupIDs = []int64{groupID}
 	restricted.Extra["openai_oauth_responses_websockets_v2_enabled"] = true
+	compatible := codexAdmissionAccount(49, false)
+	compatible.GroupIDs = []int64{groupID}
+	compatible.Priority = 1
 	cache := &countingCodexStickyCache{}
 	store := NewOpenAIWSStateStore(cache)
 	repo := &codexAdmissionAccountRepo{
-		accounts: []Account{restricted},
-		byID:     map[int64]*Account{restricted.ID: &restricted},
+		accounts: []Account{restricted, compatible},
+		byID:     map[int64]*Account{restricted.ID: &restricted, compatible.ID: &compatible},
 	}
 	svc := &OpenAIGatewayService{
 		accountRepo:        repo,
@@ -466,7 +469,7 @@ func TestCodexClientAdmissionPreviousResponseBindingIsPreserved(t *testing.T) {
 
 	recovered := restricted
 	recovered.Extra = map[string]any{"openai_oauth_responses_websockets_v2_enabled": true}
-	repo.accounts = []Account{recovered}
+	repo.accounts = []Account{recovered, compatible}
 	repo.byID[recovered.ID] = &recovered
 	recoveredCtx := newCodexAdmissionContext(t, svc)
 	selection, _, err = svc.SelectAccountWithSchedulerForCapability(

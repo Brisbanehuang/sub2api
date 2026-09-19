@@ -39,6 +39,14 @@ func newCodexAdmissionForwardGinContext(method, target string, body []byte) *gin
 func TestCodexClientAdmissionFinalGuardsDoNotReachHTTPUpstream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
+	t.Run("responses input tokens", func(t *testing.T) {
+		svc, ctx, account, upstream := newCodexAdmissionForwardGuardFixture(t)
+		body := []byte(`{"model":"gpt-5.1-codex","input":"test"}`)
+		err := svc.ForwardResponsesInputTokens(ctx, newCodexAdmissionForwardGinContext(http.MethodPost, "/v1/responses/input_tokens", body), account, body)
+		require.ErrorIs(t, err, ErrCodexClientAdmissionUnavailable)
+		require.Nil(t, upstream.lastReq)
+	})
+
 	t.Run("alpha search", func(t *testing.T) {
 		svc, ctx, account, upstream := newCodexAdmissionForwardGuardFixture(t)
 		body := []byte(`{"model":"gpt-5.1-codex","input":"test"}`)
