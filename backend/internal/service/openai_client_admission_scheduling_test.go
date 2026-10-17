@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -143,7 +144,7 @@ func TestCodexClientAdmissionTokenCountWithoutGenerationSlot(t *testing.T) {
 	}
 }
 
-func TestCodexClientAdmissionLegacyPreviousResponseKeepsPrioritySelection(t *testing.T) {
+func TestCodexClientAdmissionLegacyPreviousResponseMatchesBaselineRouting(t *testing.T) {
 	for _, accountType := range []string{AccountTypeAPIKey, AccountTypeOAuth} {
 		t.Run(accountType, func(t *testing.T) {
 			resetOpenAIAdvancedSchedulerSettingCacheForTest()
@@ -168,22 +169,28 @@ func TestCodexClientAdmissionLegacyPreviousResponseKeepsPrioritySelection(t *tes
 				codexDetector:      &accountAwareCodexAdmissionDetector{},
 				concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{}),
 			}
-			ctx := newCodexAdmissionContext(t, svc)
-			require.True(t, codexClientAdmissionActive(ctx))
 			store := svc.getOpenAIWSStateStore()
-			require.NoError(t, store.BindResponseAccount(ctx, groupID, "resp_legacy_admission", bound.ID, time.Hour))
+			for _, withAdmission := range []bool{false, true} {
+				ctx := context.Background()
+				if withAdmission {
+					ctx = newCodexAdmissionContext(t, svc)
+					require.True(t, codexClientAdmissionActive(ctx))
+				}
+				require.NoError(t, store.BindResponseAccount(ctx, groupID, "resp_legacy_admission", bound.ID, time.Hour))
 
-			selection, decision, err := svc.SelectAccountWithScheduler(ctx, &groupID, "resp_legacy_admission", "", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
-			require.NoError(t, err)
-			require.Equal(t, preferred.ID, selection.Account.ID)
-			require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
-			require.False(t, decision.StickyPreviousHit)
-			if selection.ReleaseFunc != nil {
-				selection.ReleaseFunc()
+				selection, decision, err := svc.SelectAccountWithScheduler(ctx, &groupID, "resp_legacy_admission", "", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+				require.NoError(t, err)
+				require.NotNil(t, selection)
+				require.Equal(t, bound.ID, selection.Account.ID, "高级调度关闭时按主线语义路由到持有 response 的账号，客户端准入不得改变兼容账号的选路")
+				require.Equal(t, openAIAccountScheduleLayerPreviousResponse, decision.Layer)
+				require.True(t, decision.StickyPreviousHit)
+				if selection.ReleaseFunc != nil {
+					selection.ReleaseFunc()
+				}
+				boundID, err := store.GetResponseAccount(ctx, groupID, "resp_legacy_admission")
+				require.NoError(t, err)
+				require.Equal(t, bound.ID, boundID)
 			}
-			boundID, err := store.GetResponseAccount(ctx, groupID, "resp_legacy_admission")
-			require.NoError(t, err)
-			require.Equal(t, bound.ID, boundID)
 		})
 	}
 }
