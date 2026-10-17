@@ -150,7 +150,7 @@ func (s *GatewayService) armGatewayStickySuccessGated(ctx context.Context, group
 // 逐字一致，但不安装门、不记录安装观测），再走同一套装配主体。
 //
 // 线上五个入口不再调用它——装配已移进调度器，只有那里才知道 Claude Code 限制
-// 降级后真正生效的分组（gateway_scheduling.go:115-123）；它们改为在选号前用
+// 降级后真正生效的分组（SelectAccountWithLoadAwareness）；它们改为在选号前用
 // WithGatewayStickyIdentityModel 登记身份模型。
 //
 // model 与装配主体同义：ctx 已登记身份模型时以身份模型为准，这里的入参只作回落。
@@ -204,7 +204,7 @@ func gatewayStickySuccessManaged(ctx context.Context, groupID *int64, sessionHas
 // 的双来源矛盾。候选为 0 表示既无成功偏好也无旧绑定，本次不做粘性。
 //
 // 分组必须逐字一致：调度器可能因 Claude Code 限制把 groupID 换成降级分组
-// （gateway_scheduling.go:115），handler 的兜底分组循环也会换分组；此时原分组
+// （SelectAccountWithLoadAwareness），handler 的兜底分组循环也会换分组；此时原分组
 // 的状态一律不得作为候选来源。
 func gatewayStickySuccessCandidate(ctx context.Context, groupID *int64, sessionHash string) (int64, bool) {
 	state := gatewayStickySuccessFromContext(ctx)

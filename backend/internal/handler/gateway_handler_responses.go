@@ -166,6 +166,9 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 		return
 	}
 	defer inflightRelease()
+	// 成功粘性装配会用 requestCtx 覆盖请求上下文；保留刚建立的预留，
+	// 让计费任务接管引用后再释放 handler 引用。
+	requestCtx = service.WithInflightReservation(requestCtx, service.InflightReservationFromContext(c.Request.Context()))
 
 	// Parse request for session hash
 	bodyRef := service.NewRequestBodyRef(body)
