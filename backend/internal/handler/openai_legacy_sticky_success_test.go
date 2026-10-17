@@ -136,14 +136,19 @@ func TestOpenAILegacyStickySuccessHTTPBoundary(t *testing.T) {
 		name, body string
 		profit     bool
 	}{
-		{name: "previous response", profit: true, body: `{"model":"gpt-test","input":"hello","previous_response_id":"resp_parent"}`},
-		{name: "previous response without profit control", body: `{"model":"gpt-test","input":"hello","previous_response_id":"resp_parent"}`},
+		{name: "previous response", profit: true, body: `{"model":"gpt-test","input":"hello","previous_response_id":"resp_parent","stream":false}`},
+		{name: "previous response without profit control", body: `{"model":"gpt-test","input":"hello","previous_response_id":"resp_parent","stream":false}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			upstream := &stickyUpstream{scripts: map[int64][]stickyScript{1: {{statusCode: 200, jsonBody: `{"id":"resp_test","model":"gpt-test","output":[]}`}}}}
+			upstream := &stickyUpstream{scripts: map[int64][]stickyScript{1: {{statusCode: 200, jsonBody: `{"id":"resp_test","status":"completed","model":"gpt-test","output":[],"usage":{"input_tokens":1,"output_tokens":1}}`}}}}
 			cache := newStickyGatewayTestCache()
+			ownerStore := service.NewOpenAIWSStateStore(cache)
+			require.NoError(t, ownerStore.BindResponseAccount(context.Background(), 7, "resp_parent", 1, time.Hour))
+			require.NoError(t, ownerStore.BindHTTPResponseOwner(context.Background(), 7, "resp_parent", 4, 3, time.Hour))
 			router := newOpenAILegacySuccessFixture(t, upstream, cache, tc.profit)
-			requestOpenAILegacySuccess(router, "/v1/responses", tc.body)
+			response := requestOpenAILegacySuccess(router, "/v1/responses", tc.body)
+			require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+			require.Equal(t, []int64{1}, upstream.hitOrder())
 			require.Empty(t, cache.successes)
 		})
 	}

@@ -52,6 +52,7 @@ type stickyUpstream struct {
 	mu      sync.Mutex
 	hits    []int64
 	scripts map[int64][]stickyScript
+	observe func(context.Context)
 }
 
 func (u *stickyUpstream) respond(accountID int64) (*http.Response, error) {
@@ -108,12 +109,18 @@ func (u *stickyUpstream) Do(req *http.Request, _ string, accountID int64, _ int)
 	if req != nil && req.Body != nil {
 		_, _ = io.ReadAll(req.Body)
 	}
+	if u.observe != nil {
+		u.observe(req.Context())
+	}
 	return u.respond(accountID)
 }
 
 func (u *stickyUpstream) DoWithTLS(req *http.Request, _ string, accountID int64, _ int, _ *tlsfingerprint.Profile) (*http.Response, error) {
 	if req != nil && req.Body != nil {
 		_, _ = io.ReadAll(req.Body)
+	}
+	if u.observe != nil {
+		u.observe(req.Context())
 	}
 	return u.respond(accountID)
 }
@@ -336,13 +343,17 @@ type stickyFixture struct {
 // stickyUsageLogRepo 只截获 Create：其余方法在本用例里不会被调用。
 type stickyUsageLogRepo struct {
 	service.UsageLogRepository
-	mu   sync.Mutex
-	logs []*service.UsageLog
+	mu       sync.Mutex
+	logs     []*service.UsageLog
+	onCreate func()
 }
 
 func (r *stickyUsageLogRepo) Create(_ context.Context, log *service.UsageLog) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.onCreate != nil {
+		r.onCreate()
+	}
 	copied := *log
 	r.logs = append(r.logs, &copied)
 	return true, nil
@@ -380,6 +391,7 @@ type stickyFixtureOptions struct {
 	mutateGroup func(*service.Group)
 	// groupRepo 覆盖默认的单分组替身，用于多分组场景。
 	groupRepo service.GroupRepository
+	configure func(*GatewayHandler)
 }
 
 // newStickyFixture 装配真实 handler + /v1/messages 路由。
@@ -426,6 +438,9 @@ func newStickyFixture(t *testing.T, accounts []*service.Account, upstream *stick
 		maxAccountSwitchesGemini: 3,
 	}
 
+	if opts.configure != nil {
+		opts.configure(h)
+	}
 	apiKey := &service.APIKey{
 		ID: 30, UserID: 40, GroupID: &groupID, Group: group,
 		User: &service.User{ID: 40, Concurrency: 4, Balance: 100, Status: service.StatusActive}, Status: service.StatusActive,
@@ -438,6 +453,8 @@ func newStickyFixture(t *testing.T, accounts []*service.Account, upstream *stick
 		c.Next()
 	})
 	router.POST("/v1/messages", h.Messages)
+	router.POST("/v1/responses", h.Responses)
+	router.POST("/v1/chat/completions", h.ChatCompletions)
 
 	return &stickyFixture{router: router, group: group, usage: usageLogs, cleanup: billing.Stop}
 }
@@ -924,4 +941,35 @@ func TestGatewayStickySuccessKeepsRequestedModelsIsolatedAfterChannelMapping(t *
 	upstream.resetHits()
 	send(aliasA)
 	assert.Equal(t, []int64{accountA}, upstream.hitOrder(), "alias A's still eligible successful account must not be replaced by alias B's fallback")
+}
+
+func TestGatewayStickySuccessCompatibilityDowngrade(t *testing.T) {
+	for _, tc := range []struct{ path, body string }{
+		{"/v1/responses", `{"model":"claude-sonnet-4-5","input":"hello","stream":true}`},
+		{"/v1/chat/completions", `{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hello"}],"stream":true}`},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			fixture, cache, upstream := stickyDowngradeFixture(t, true, true)
+			request := func() *httptest.ResponseRecorder {
+				req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+				req.Header.Set("Content-Type", "application/json")
+				rec := httptest.NewRecorder()
+				fixture.router.ServeHTTP(rec, req)
+				return rec
+			}
+			first := request()
+			require.Equal(t, http.StatusOK, first.Code, first.Body.String())
+			require.Equal(t, []int64{9951, 9952}, upstream.hitOrder())
+			require.EqualValues(t, 9952, cache.bindingFor(21))
+			require.Zero(t, cache.bindingFor(20))
+			require.Equal(t, 1, cache.preferenceCount())
+			for _, key := range cache.keys() {
+				require.Contains(t, key, ":21:")
+			}
+			upstream.resetHits()
+			second := request()
+			require.Equal(t, http.StatusOK, second.Code, second.Body.String())
+			require.Equal(t, []int64{9952}, upstream.hitOrder())
+		})
+	}
 }
