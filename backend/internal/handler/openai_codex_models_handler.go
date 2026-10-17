@@ -50,7 +50,15 @@ func (h *OpenAIGatewayHandler) CodexModels(c *gin.Context) {
 			if c.Request.Context().Err() != nil {
 				return
 			}
+			// 客户端准入的权威读取失败时固定 503，不回退调度器放大仓库故障。
+			if errors.Is(pinnedErr, service.ErrCodexClientAdmissionUnavailable) {
+				h.handleOpenAICodexAdmissionError(c, pinnedErr, false, false)
+				return
+			}
 			if !apiKey.Group.CodexModelsManifestConfig.FallbackToScheduler {
+				if h.handleOpenAICodexAdmissionError(c, pinnedErr, false, false) {
+					return
+				}
 				if errors.Is(pinnedErr, service.ErrNoPinnedCodexModelsAccounts) {
 					h.errorResponse(c, http.StatusServiceUnavailable, "upstream_error", "No available pinned OpenAI accounts")
 					return

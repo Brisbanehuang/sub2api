@@ -309,3 +309,86 @@ func TestOpenAIClientAdmissionUnavailablePreservesStreamingResponse(t *testing.T
 	require.Contains(t, w.Body.String(), "temporarily unavailable")
 	require.False(t, strings.HasPrefix(strings.TrimSpace(w.Body.String()), "{"), "已开始的 Images SSE 不得尾随普通 JSON")
 }
+
+type pinnedClientAdmissionRepo struct {
+	codexModelsFailoverAccountRepo
+	getErr error
+}
+
+func (r pinnedClientAdmissionRepo) GetByID(ctx context.Context, id int64) (*service.Account, error) {
+	if r.getErr != nil {
+		return nil, r.getErr
+	}
+	return r.codexModelsFailoverAccountRepo.GetByID(ctx, id)
+}
+
+func pinnedClientAdmissionOAuthAccount(id int64, restricted bool) service.Account {
+	account := newPinnedCodexAccount(id, service.StatusActive, true, false)
+	account.Type = service.AccountTypeOAuth
+	account.Credentials = map[string]any{"access_token": "pinned-oauth-token"}
+	account.Extra = map[string]any{}
+	if restricted {
+		account.Extra["codex_cli_only"] = true
+	}
+	return account
+}
+
+// 兼容 OAuth 固定账号的放行路径会请求 ChatGPT 地址，由 service 包的
+// TestFetchPinnedCodexModelsManifestAppliesClientAdmission 用本地服务覆盖；
+// 这里只验证 handler 对准入错误的映射，不发出任何上游请求。
+func TestCodexModelsPinnedAccountsMapClientAdmissionErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		accounts    []service.Account
+		pinnedIDs   []int64
+		fallback    bool
+		getErr      error
+		wantStatus  int
+		wantMessage string
+	}{
+		{
+			name:        "all pinned accounts restricted returns typed forbidden",
+			accounts:    []service.Account{pinnedClientAdmissionOAuthAccount(2, true)},
+			pinnedIDs:   []int64{2},
+			wantStatus:  http.StatusForbidden,
+			wantMessage: service.CodexOfficialClientsOnlyMessage,
+		},
+		{
+			name:        "repository failure fails closed without scheduler fallback",
+			accounts:    []service.Account{pinnedClientAdmissionOAuthAccount(2, false)},
+			pinnedIDs:   []int64{2},
+			fallback:    true,
+			getErr:      errors.New("database unavailable"),
+			wantStatus:  http.StatusServiceUnavailable,
+			wantMessage: "temporarily unavailable",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := &codexModelsPinnedHTTPUpstream{}
+			gin.SetMode(gin.TestMode)
+			gatewayService := service.NewOpenAIGatewayService(
+				pinnedClientAdmissionRepo{codexModelsFailoverAccountRepo: codexModelsFailoverAccountRepo{accounts: tc.accounts}, getErr: tc.getErr},
+				nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+				upstream,
+				nil, nil, nil, nil, nil, nil, nil, nil,
+			)
+			handler := &OpenAIGatewayHandler{gatewayService: gatewayService, maxAccountSwitches: 3}
+			group := &service.Group{
+				ID:       7801,
+				Platform: service.PlatformOpenAI,
+				CodexModelsManifestConfig: service.GroupCodexModelsManifestConfig{
+					Enabled:             true,
+					AccountIDs:          tc.pinnedIDs,
+					FallbackToScheduler: tc.fallback,
+				},
+			}
+
+			recorder := performPinnedCodexModelsRequest(t, handler, group, "")
+			require.Equal(t, tc.wantStatus, recorder.Code, recorder.Body.String())
+			if tc.wantMessage != "" {
+				require.Contains(t, gjson.Get(recorder.Body.String(), "error.message").String(), tc.wantMessage)
+			}
+			require.Empty(t, upstream.accountIDs(), "未通过客户端准入的固定账号不得请求上游")
+		})
+	}
+}

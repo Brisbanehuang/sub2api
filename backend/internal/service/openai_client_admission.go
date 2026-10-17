@@ -256,6 +256,36 @@ func (s *OpenAIGatewayService) GrantOpenAIWSTerminalAdmission(
 	return true
 }
 
+// admitPinnedCodexModelsAccount performs the authoritative terminal admission
+// for one pinned Codex models manifest account. The pinned mode bypasses the
+// scheduler and fetches every pinned account concurrently, so each fetch gets
+// its own grant in an isolated copy of the request-frozen client policy rather
+// than racing on the request snapshot's single terminal grant. Denials and
+// repository failures are still recorded on the request snapshot so a
+// scheduler fallback reports the same typed result.
+func (s *OpenAIGatewayService) admitPinnedCodexModelsAccount(ctx context.Context, account *Account) (context.Context, *Account, error) {
+	if !codexClientAdmissionAppliesToAccount(ctx, account) {
+		return ctx, account, nil
+	}
+	parent, _ := codexClientAdmissionSnapshotFromContext(ctx)
+	isolated := &codexClientAdmissionSnapshot{
+		standard:          parent.standard,
+		appServer:         parent.appServer,
+		enforcementActive: parent.enforcementActive,
+	}
+	isolatedCtx := context.WithValue(ctx, codexClientAdmissionContextKey{}, isolated)
+	admission, err := s.OpenAITerminalAdmissionLatest(isolatedCtx, account)
+	if err != nil {
+		parent.recordUnavailable()
+		return ctx, nil, err
+	}
+	if admission.ClientVetoed {
+		parent.recordDenied(admission.ClientRestriction)
+		return ctx, nil, &CodexClientAdmissionError{Result: admission.ClientRestriction}
+	}
+	return isolatedCtx, admission.Account, nil
+}
+
 func recordCodexClientAdmissionStickySkip(ctx context.Context, accountID int64) {
 	snapshot, ok := codexClientAdmissionSnapshotFromContext(ctx)
 	if !ok {

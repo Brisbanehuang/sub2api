@@ -806,3 +806,102 @@ func TestOpenAITerminalAdmissionAPIKeyProfitRefreshFailureRemainsFailOpen(t *tes
 	require.Equal(t, int64(1), cache.calls.Load())
 	require.Equal(t, int64(1), repo.getCalls.Load(), "利润门快照 miss 仍沿用既有数据库 fallback；失败后必须 fail-open")
 }
+
+type pinnedCodexAdmissionAccountRepo struct {
+	*codexAdmissionAccountRepo
+}
+
+func (r pinnedCodexAdmissionAccountRepo) ListByGroup(context.Context, int64) ([]Account, error) {
+	return append([]Account(nil), r.accounts...), nil
+}
+
+func TestFetchPinnedCodexModelsManifestAppliesClientAdmission(t *testing.T) {
+	var upstreamCalls atomic.Int64
+	var gotAuth atomic.Value
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls.Add(1)
+		gotAuth.Store(r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[{"slug":"model-compatible"}]}`))
+	}))
+	defer server.Close()
+	original := chatgptCodexModelsURL
+	chatgptCodexModelsURL = server.URL
+	defer func() { chatgptCodexModelsURL = original }()
+
+	pinnedAccount := func(id int64, restricted bool, token string) Account {
+		account := codexAdmissionAccount(id, restricted)
+		account.Credentials = map[string]any{"access_token": token}
+		return account
+	}
+	newService := func(repo *codexAdmissionAccountRepo) *OpenAIGatewayService {
+		return &OpenAIGatewayService{
+			accountRepo:   pinnedCodexAdmissionAccountRepo{codexAdmissionAccountRepo: repo},
+			cfg:           &config.Config{},
+			codexDetector: &accountAwareCodexAdmissionDetector{},
+		}
+	}
+	newGroup := func(ids ...int64) *Group {
+		return &Group{
+			ID:                        7851,
+			Platform:                  PlatformOpenAI,
+			CodexModelsManifestConfig: GroupCodexModelsManifestConfig{Enabled: true, AccountIDs: ids},
+		}
+	}
+
+	t.Run("compatible pinned OAuth account receives its own terminal grant", func(t *testing.T) {
+		upstreamCalls.Store(0)
+		restricted := pinnedAccount(78511, true, "token-restricted")
+		compatible := pinnedAccount(78512, false, "token-compatible")
+		repo := &codexAdmissionAccountRepo{
+			accounts: []Account{restricted, compatible},
+			byID:     map[int64]*Account{restricted.ID: &restricted, compatible.ID: &compatible},
+		}
+		svc := newService(repo)
+		ctx := newCodexAdmissionContext(t, svc)
+		require.True(t, codexClientAdmissionActive(ctx))
+
+		manifest, account, err := svc.FetchPinnedCodexModelsManifest(ctx, newGroup(restricted.ID, compatible.ID), "0.144.0")
+		require.NoError(t, err, "非 Codex 客户端仍可经兼容的固定 OAuth 账号拉取清单")
+		require.NotNil(t, manifest)
+		require.Equal(t, compatible.ID, account.ID)
+		require.Contains(t, string(manifest.Body), "model-compatible")
+		require.Equal(t, int64(1), upstreamCalls.Load(), "受限固定账号不得请求上游")
+		require.Equal(t, "Bearer token-compatible", gotAuth.Load())
+	})
+
+	t.Run("all pinned accounts restricted returns typed restriction", func(t *testing.T) {
+		upstreamCalls.Store(0)
+		restricted := pinnedAccount(78521, true, "token-restricted")
+		repo := &codexAdmissionAccountRepo{
+			accounts: []Account{restricted},
+			byID:     map[int64]*Account{restricted.ID: &restricted},
+		}
+		svc := newService(repo)
+		ctx := newCodexAdmissionContext(t, svc)
+
+		manifest, _, err := svc.FetchPinnedCodexModelsManifest(ctx, newGroup(restricted.ID), "0.144.0")
+		require.Nil(t, manifest)
+		require.ErrorIs(t, err, ErrCodexClientRestricted)
+		require.ErrorIs(t, CodexClientAdmissionErrorFromContext(ctx), ErrCodexClientRestricted, "否决须记录到请求快照，供调度器回退复用")
+		require.Zero(t, upstreamCalls.Load())
+	})
+
+	t.Run("repository failure fails closed", func(t *testing.T) {
+		upstreamCalls.Store(0)
+		compatible := pinnedAccount(78531, false, "token-compatible")
+		repo := &codexAdmissionAccountRepo{
+			accounts: []Account{compatible},
+			byID:     map[int64]*Account{compatible.ID: &compatible},
+			getErr:   errors.New("database unavailable"),
+		}
+		svc := newService(repo)
+		ctx := newCodexAdmissionContext(t, svc)
+
+		manifest, _, err := svc.FetchPinnedCodexModelsManifest(ctx, newGroup(compatible.ID), "0.144.0")
+		require.Nil(t, manifest)
+		require.ErrorIs(t, err, ErrCodexClientAdmissionUnavailable)
+		require.ErrorIs(t, CodexClientAdmissionErrorFromContext(ctx), ErrCodexClientAdmissionUnavailable)
+		require.Zero(t, upstreamCalls.Load())
+	})
+}
